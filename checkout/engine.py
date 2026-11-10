@@ -35,6 +35,7 @@ from .catalog import HAND, HELD, PERSON, Catalog
 from .geometry import Det, cover, dilate, drop_groups, grow, inter, iou, make_det, nms
 
 CAND, REST, HELD_STATE, GONE = "candidate", "rest", "held", "gone"
+_NO_MASK = np.zeros((1, 1), bool)  # what a gone track behind a cart line keeps instead of its mask
 
 
 @dataclass
@@ -242,8 +243,20 @@ class Engine:
         self.hands = self._own_hands(by_label.get(HAND, []), present)
         observations = self._observe(by_label, present)
         self._track(t, dt, observations, present)
+        self._prune()
 
         return self.snapshot(self.events[first_event:])
+
+    def _prune(self) -> None:
+        """Forget tracks that are gone for good. Every outline SAM ever found starts one, so on a camera left running
+        all day they would pile up, each with its mask. A gone track behind a cart line is kept, without its mask."""
+        lines = {e.item.id for e in self.entries}
+        for item_id in [i for i, item in self.items.items() if item.state == GONE]:
+            item = self.items[item_id]
+            if item_id not in lines:
+                del self.items[item_id]
+            elif item.mask.size > 1:
+                item.mask, item.polygons = _NO_MASK, []
 
     # ------------------------------------------------------------------ a camera that moves
 

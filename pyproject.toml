@@ -20,3 +20,8 @@ dev = ["pytest>=8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv]
+# rapidocr asks for the desktop OpenCV, which shares the `cv2` folder with the headless one above and needs a
+# desktop's graphics libraries (libxcb, libGL) a server does not have. This marker is never true: it is not installed.
+override-dependencies = ["opencv-python; sys_platform == 'never'"]

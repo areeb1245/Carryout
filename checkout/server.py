@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import types
 import html
 import json
 import logging
@@ -757,6 +758,7 @@ async def ws(socket: WebSocket):
                 if kind == "start":
                     if session:
                         session.cancel()
+                        keep_pictures(session)
                     path = shop_file(str(data.get("shop", ""))) or shop_file(DEFAULT_SHOP)
                     catalog = Catalog.from_dict(data["catalog"]) if data.get("catalog") else Catalog.load(path)
                     catalog.shop = path.stem
@@ -789,6 +791,14 @@ async def ws(socket: WebSocket):
             task.cancel()
         if session:
             session.cancel()
+            keep_pictures(session)
+
+
+def keep_pictures(session: Session) -> None:
+    """A visit that is over keeps only what the page can still ask for: the pictures each bag was checked against.
+    Its frames, tracks and models' answers go, so a few old visits do not hold on to a few hundred MB."""
+    if session.id in app.state.sessions:
+        app.state.sessions[session.id] = types.SimpleNamespace(shown=session.shown)
 
 
 app.mount("/samples", StaticFiles(directory=SAMPLES), name="samples")

@@ -93,8 +93,14 @@ What to know:
 - **Its own face table.** `FACE_TABLE=checkout_faces_render`: the copy on this computer and the one on Render each
   keep the face table matching their own database, and "Delete all shoppers" empties it, so they must not share one.
 - **One instance.** Gate tickets, live visits and the sign-in throttle live in the process's memory.
-- **Plan.** A disk needs a paid plan. The server peaked at about 250 MB on the supermarket clip and 340 MB on the
-  book clip; Starter (512 MB) fits, Standard if it restarts for memory.
+- **Plan.** A disk needs a paid plan. Under a 512 MB cap in Linux, seven sample visits in a row (supermarket and
+  book clips) levelled off at about 375 MB: 160 MB idle, the reading model for titles about 100 MB once a bookshop is
+  used. Starter (512 MB) fits; Standard if it ever restarts for memory.
+- **Memory over a long day.** A finished visit keeps only the pictures its bag was checked against. A settled
+  shopper's frames are dropped. Whole frames are kept as JPEG, and tracks that are gone for good are forgotten.
+  `MALLOC_ARENA_MAX=2` stops each thread from keeping its own memory pool.
+- **Headless OpenCV only.** The OCR package asks for the desktop OpenCV, which needs graphics libraries a server does
+  not have and shares the `cv2` folder with the headless one; `pyproject.toml` overrides it away.
 - **The face models** (`models/*.onnx`, 37 MB) are in the repository, so the build needs nothing else.
 
 Keys live in `.env`, which git ignores (`.env.example` lists them):

@@ -28,6 +28,10 @@ services:
         value: checkout_faces_render
       - key: PAYPAL_ENV
         value: sandbox
+      # glibc gives every thread its own memory arena; with OpenCV, ONNX and the event loop's threads that alone can
+      # cost a few hundred MB on 512. Two arenas are plenty for one process.
+      - key: MALLOC_ARENA_MAX
+        value: "2"
       # staff sign-in
       - key: STAFF_CODE
         sync: false

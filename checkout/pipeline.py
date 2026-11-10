@@ -215,7 +215,7 @@ class Session:
         self.model_ms += float(result.get("ms") or 0.0)
         first = len(self.engine.events)
         self._faces(frame, state)
-        self._keep_views(t, frame, state)
+        self._keep_views(t, frame, state, jpeg)
         for event in state["events"]:
             if event["type"] in ("pick", "handover"):
                 self._pick_shot(event, frame, state)
@@ -397,6 +397,18 @@ class Session:
     # pictures for the last check
 
     @staticmethod
+    def _image(kept) -> np.ndarray:
+        """A kept picture as an image: whole frames are kept as JPEG bytes."""
+        return cv2.imdecode(np.frombuffer(kept, np.uint8), cv2.IMREAD_COLOR) if isinstance(kept, (bytes, bytearray)) else kept
+
+    @staticmethod
+    def _shrink(image: np.ndarray, side: int = PROOF_SIDE) -> np.ndarray:
+        """No bigger than the model and the ledger are shown it."""
+        h, w = image.shape[:2]
+        k = side / max(h, w)
+        return cv2.resize(image, (max(2, round(w * k)), max(2, round(h * k))), interpolation=cv2.INTER_AREA) if k < 1 else image
+
+    @staticmethod
     def _crop(frame: np.ndarray, box: list[float], grow: float = 0.0) -> np.ndarray:
         h, w = frame.shape[:2]
         bw, bh = box[2] - box[0], box[3] - box[1]
@@ -418,9 +430,10 @@ class Session:
         need_w, need_h = max(0.0, 0.6 * pw - (x1 - x0)) / 2, max(0.0, 0.45 * ph - (y1 - y0)) / 2
         return self._crop(frame, [x0 - need_w, y0 - need_h, x1 + need_w, y1 + need_h], 0.35)
 
-    def _keep_views(self, t: float, frame: np.ndarray, state: dict) -> None:
+    def _keep_views(self, t: float, frame: np.ndarray, state: dict, jpeg: bytes | None = None) -> None:
         """Keep the latest couple of pictures of every shopper who has something on their bill: the last check
-        wants to see what they still had on the way out."""
+        wants to see what they still had on the way out. Whole frames are kept as the JPEG the camera sent (a raw
+        frame 1600 wide is 4 MB, its JPEG about a twentieth of that) and close views at the size the model is shown."""
         verifier = self.services.verifier
         if verifier is None or not verifier.enabled:
             return
@@ -431,13 +444,13 @@ class Session:
                 continue
             last = memo.setdefault("last", [])  # their last few seconds, closely spaced: read again at the door
             if not last or not 0 <= t - last[-1][0] < LAST_GAP_S:
-                last.append((t, frame, person["box"], self._carrying_view(pid, frame, state, person["box"])))
+                last.append((t, jpeg if jpeg is not None else frame, person["box"], self._shrink(self._carrying_view(pid, frame, state, person["box"]))))
                 del last[:-LAST_LOOKS]
             if memo["recent"] and 0 <= t - memo["recent"][-1][0] < VIEW_GAP_S:
                 continue
-            memo["recent"].append((t, last[-1][3] if last[-1][0] == t else self._carrying_view(pid, frame, state, person["box"])))
+            memo["recent"].append((t, last[-1][3] if last[-1][0] == t else self._shrink(self._carrying_view(pid, frame, state, person["box"]))))
             del memo["recent"][:-2]
-            memo["scene"] = (t, frame)  # and the whole picture, shelves included, the last time they were seen
+            memo["scene"] = (t, jpeg if jpeg is not None else frame)  # and the whole picture, shelves included, the last time they were seen
 
     def _pictures(self, pid: int, entries: list) -> list[tuple[float, np.ndarray]]:
         """What the last check is shown, oldest first: for each line the picture in which that item was read in
@@ -456,7 +469,7 @@ class Session:
                 chosen.setdefault(hit[0], (hit[1], []))[1].append(self.catalog.by_id[entry.item.cls].name)
         ending = [(t, image, "last close view of hands") for t, image in memo["recent"] if t not in chosen][-1:]
         if memo.get("scene"):
-            ending.append((*memo["scene"], "last full view"))
+            ending.append((memo["scene"][0], self._image(memo["scene"][1]), "last full view"))
         read = [(t, image, " and ".join(names) + " in hand") for t, (image, names) in sorted(chosen.items())]
         return read[-(AUDIT_PICTURES - len(ending)):] + ending
 
@@ -542,7 +555,7 @@ class Session:
             self.engine.apply_look(entry_id, verdict["holding"], verdict["product"], why, weight=2 if agree else 1)
             if verdict["holding"] and verdict["product"] and pid is not None:
                 # a picture in which this item was seen in their hand, for the check before charging
-                self.evidence.setdefault(pid, {"read": {}, "recent": []})["read"][verdict["product"]] = (t, self._crop(frame, box, 1.5))
+                self.evidence.setdefault(pid, {"read": {}, "recent": []})["read"][verdict["product"]] = (t, self._shrink(self._crop(frame, box, 1.5)))
         elif reading and reading.sure:
             self.engine.apply_look(entry_id, True, reading.product.id, f'Reads "{reading.quote()}"', weight=2)
         self._update(first)
@@ -640,7 +653,7 @@ class Session:
                 continue  # nothing taken yet: nothing to ask about
             self.hand_asks[pid] = (asked + 1, t)
             self.asking[pid] = self.asking.get(pid, 0) + 1
-            task = self._spawn(self._ask_hand(pid, t, frame, person["box"], self._carrying_view(pid, frame, state, person["box"])))
+            task = self._spawn(self._ask_hand(pid, t, frame, person["box"], self._shrink(self._carrying_view(pid, frame, state, person["box"]))))
             pending = self.checks.setdefault(pid, set())
             pending.add(task)
             task.add_done_callback(pending.discard)
@@ -721,7 +734,7 @@ class Session:
         if not frames:
             return
         books = [p for group in self.catalog.members.values() for p in group]
-        answers = await asyncio.gather(*(verifier.carried(frame, box, books) for _, frame, box, _ in frames), return_exceptions=True)
+        answers = await asyncio.gather(*(verifier.carried(self._image(frame), box, books) for _, frame, box, _ in frames), return_exceptions=True)
         read: dict[str, list] = {}
         clear = []  # the answers from pictures in which their hands could be seen
         for (t, _, _, view), answer in zip(frames, answers):
@@ -786,7 +799,7 @@ class Session:
             goods = [p for p in self.catalog.products if not self.catalog.family_of(p.id)]
             billed = list(dict.fromkeys(e.item.cls for e in lines))
             refs = self._references([self.catalog.by_id[c] for c in billed] + [p for p in goods if p.id not in billed])
-            got = await asyncio.gather(*(verifier.still_carried(frame, box, goods, refs) for _, frame, box, _ in frames), return_exceptions=True)
+            got = await asyncio.gather(*(verifier.still_carried(self._image(frame), box, goods, refs) for _, frame, box, _ in frames), return_exceptions=True)
             answers = [(t, view, a) for (t, _, _, view), a in zip(frames, got) if isinstance(a, dict)]
         with_them: set[str] = set()
         for t, view, answer in answers:
@@ -1012,6 +1025,9 @@ class Session:
         finally:
             if row is not None:  # now with the invoice and the email on it
                 ledger.finish(row, payment, self._detail(pid, payment, admitted, door_s))
+            # Settled: their pictures are in the ledger and the page has the ones the check was shown. A shopper who
+            # comes back starts a fresh set; on a camera left running all day, old sets would pile up.
+            self.evidence.pop(pid, None)
 
     # the ledger: what is kept about a walk-out
 
