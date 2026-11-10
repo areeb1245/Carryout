@@ -106,8 +106,13 @@ def describe(event: dict, state: dict) -> str:
         case "handover":
             return f"{t}  Shopper {event['from_person']} handed {name} to {who}"
         case "checkin":
-            card = f"{event['brand']} ending {event['last4']}" if event.get("last4") else "no card"
-            return f"{t}  {who} checked in as {event['name']} ({'recognised by face' if event['how'] == 'recognised' else 'new'}, {card})"
+            return f"{t}  {who} is {event['name']}, let in at the gate ({event.get('method') or 'no payment method'})"
+        case "unregistered":
+            return f"{t}  {who} is not registered at the gate{' (face matches ' + event['name'] + ', who has no open visit)' if event.get('name') else ''}: nothing will be charged"
+        case "audit":
+            return f"{t}  Check before charging, {name}: {event['verdict']} ({event['why']})"
+        case "invoice":
+            return f"{t}  Invoice {event.get('number') or ''} {event['status']}: {event.get('url') or event.get('message') or ''}"
         case "verify":
             return f"{t}  Second model on {name}: {event['verdict']} ({event['why']})"
         case "email":
@@ -121,7 +126,7 @@ async def run(args) -> dict:
     catalog = Catalog.load(Path(args.catalog))
     sam = SamClient(cache_dir=None if args.no_cache else ROOT / ".cache" / "sam")
     services = Services(sam, Verifier() if args.verify else None, Profiles() if args.pay else None, Payments() if args.pay else None, None, Reader() if args.verify else None)
-    session = Session(services, catalog, auto_checkin=args.pay)
+    session = Session(services, catalog)
     cap = cv2.VideoCapture(args.video)
     src_fps = cap.get(cv2.CAP_PROP_FPS) or 25
     step = max(1, round(src_fps / args.fps))
@@ -225,7 +230,7 @@ def main() -> None:
     ap.add_argument("--trace", action="store_true", help="print what the engine saw on every frame")
     ap.add_argument("--no-cache", action="store_true")
     ap.add_argument("--verify", action="store_true", help="have the vision language model look at every pick")
-    ap.add_argument("--pay", action="store_true", help="check shoppers in with Stripe test cards and charge them at the end")
+    ap.add_argument("--pay", action="store_true", help="charge the shoppers who registered at the gate (their saved PayPal method) at the end")
     asyncio.run(run(ap.parse_args()))
 
 

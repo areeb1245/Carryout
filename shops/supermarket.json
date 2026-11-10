@@ -1,6 +1,6 @@
 {
   "name": "Supermarket",
-  "currency": "AED",
+  "currency": "USD",
   "products": [
     {
       "id": "frozen-meal",

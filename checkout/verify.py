@@ -8,6 +8,9 @@ three looks at a pick, on different frames, and settles the product or disputes 
 
 `name_item` is the same question for an item still on its shelf (which of these books is this spine?), used to read
 the stock before anyone touches it. Both run beside the frame loop, never in it.
+
+`audit` is the last word before money moves: one call per walk-out with the shopper's bill and the pictures in which
+they were seen carrying things. It answers line by line: kept, put back, or unclear. Only "kept" is charged.
 """
 from __future__ import annotations
 
@@ -45,6 +48,23 @@ SHELF = (
     '{"product": one catalogue id or null, "why": at most 12 words, quoting the text you read}. '
     '"product" is null when you cannot read enough to tell, or it is none of the entries. Do not guess.'
 )
+AUDIT = (
+    "You are the last check before a shopper at a cashierless shop is charged. You get their bill and pictures of them "
+    "from the shop's camera, oldest first, each marked with a letter in its top left corner. The earlier pictures are "
+    "moments at which items were read in their hands. The last picture is the whole scene the last time they were seen. "
+    "For every bill line report two observations. "
+    '"held_in": the letter of a picture in which this shopper is holding that exact item (in a hand, under an arm, or '
+    "in a stack they hold), or null if no picture shows that. Where the item carries text, such as a book, only count "
+    'a picture in which you can read its title on it, and give the words you read as "read". '
+    '"put_down_in": the letter of a later picture in which you can see that same item at rest again on a shelf, '
+    "table or counter with nobody's hand on it; otherwise null. An item still in a hand is not put down, even when "
+    "that hand is near a shelf. An item you cannot see, because a hand, their body, a bag or another item hides it or "
+    "it is out of the picture, is not put down. "
+    'Reply with JSON only: {"lines": [{"line": bill line number, "held_in": letter or null, "read": words read on '
+    'the item or "", "put_down_in": letter or null, "why": at most 14 words on what you saw}]}. '
+    "One entry for every bill line and no others. Report only what the pictures show; when unsure, use null."
+)
+VERDICTS = ("kept", "put_back", "unclear")
 
 
 class Verifier:
@@ -82,6 +102,62 @@ class Verifier:
     async def name_item(self, frame: np.ndarray, box: list[float], products: list[Product], ocr_text: str = "") -> dict | None:
         """Which of `products` the boxed shelf item is. Returns {product, why}, or None."""
         return await self._ask(SHELF, frame, box, products, ocr_text)
+
+    async def audit(self, lines: list[dict], pictures: list[tuple[float, np.ndarray]]) -> dict | None:
+        """The check before a charge. `lines` are {line, name, by, looks_like}; `pictures` are (seconds into the
+        visit, image), oldest first. Returns {line: {verdict: kept | put_back | unclear, why}} with an entry for
+        every line, or None when the model gave no usable answer."""
+        if not self.enabled or not lines or not pictures:
+            return None
+        content = [{"type": "text", "text": "Bill: " + json.dumps(lines, ensure_ascii=False) + "\nPictures, oldest first: " + ", ".join(f"{chr(65 + i)} at {t:.0f} s" for i, (t, _) in enumerate(pictures))}]
+        for i, (_, image) in enumerate(pictures):
+            content.append({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(self.lettered(image, chr(65 + i))).decode()}})
+        body = {
+            "model": self.model, "temperature": 0, "max_tokens": 120 + 60 * len(lines), "reasoning_effort": "none", "response_format": {"type": "json_object"},
+            "messages": [{"role": "system", "content": AUDIT}, {"role": "user", "content": content}],
+        }
+        try:
+            r = await self.http.post(f"{self.url}/v1/chat/completions", json=body)
+            r.raise_for_status()
+            answer = json.loads(r.json()["choices"][0]["message"]["content"])
+            rows = answer["lines"]
+            asked = {line["line"] for line in lines}
+            letters = [chr(65 + i) for i in range(len(pictures))]
+            out = {}
+            for row in rows:
+                number = int(row.get("line"))
+                if number not in asked or number in out:
+                    continue
+                held, down = self._letter(row.get("held_in"), letters), self._letter(row.get("put_down_in"), letters)
+                read, why = str(row.get("read") or "").strip()[:60], str(row.get("why") or "").strip()[:100]
+                if held is None:
+                    out[number] = {"verdict": "unclear", "why": why or "no picture shows it in their hands"}
+                elif down is not None and letters.index(down) > letters.index(held):
+                    out[number] = {"verdict": "put_back", "why": f"in their hands in picture {held}, put down in picture {down}"}
+                else:
+                    seen = f'read "{read}" in their hands' if read else "seen in their hands"
+                    out[number] = {"verdict": "kept", "why": f"picture {held}, {seen}"}
+            for number in asked - set(out):  # a line the model skipped is a line it did not confirm
+                out[number] = {"verdict": "unclear", "why": "the check gave no answer for this line"}
+            return out
+        except (httpx.HTTPError, KeyError, IndexError, ValueError, TypeError, AttributeError):
+            return None
+
+    @staticmethod
+    def _letter(value, letters: list[str]) -> str | None:
+        """A picture letter the model named, if it is one of the pictures it was shown."""
+        text = str(value or "").strip().upper()
+        return text[:1] if text[:1] in letters and len(text) <= 2 else None
+
+    @staticmethod
+    def lettered(image: np.ndarray, letter: str, side: int = 896) -> bytes:
+        """The picture at a size the model reads well, with its letter in the top left corner."""
+        h, w = image.shape[:2]
+        k = min(1.0, side / max(h, w))
+        small = cv2.resize(image, (round(w * k), round(h * k)), interpolation=cv2.INTER_AREA) if k < 1 else image.copy()
+        cv2.rectangle(small, (0, 0), (44, 44), (0, 255, 255), -1)
+        cv2.putText(small, letter, (10, 34), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 0, 0), 3, cv2.LINE_AA)
+        return cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 88])[1].tobytes()
 
     async def _ask(self, system: str, frame: np.ndarray, box: list[float], products: list[Product], ocr_text: str) -> dict | None:
         if not self.enabled:

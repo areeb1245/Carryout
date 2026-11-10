@@ -171,3 +171,45 @@ def test_matching_ocr_text_to_titles(text, title, sure):
     assert reading.sure == sure
     if sure:
         assert reading.product.name == title
+
+
+def test_a_title_wrongly_seen_put_back_returns_to_the_cart_when_read_in_the_hands_twice(tmp_path):
+    """The outlines can mistake a book held next to the shelf for a book put back. If the second model then reads
+    that title in the shopper's hands on two more looks, it is on the cart again, once."""
+    import asyncio
+
+    from checkout.pipeline import Services, Session
+
+    class Hands:
+        enabled = True
+
+        async def carried(self, frame, box, products):
+            return {"products": ["deep-work"], "unreadable": 0, "hands_visible": True, "why": 'read "DEEP WORK"'}
+
+    async def scenario():
+        session = Session(Services(None, Hands()), BOOKS)
+        engine = session.engine
+        shelf = Shelf()
+        shelf.engine = engine
+        shelf.settle_in()
+        pid = engine.snapshot()["people"][0]["id"]
+
+        async def look(t):
+            await session._ask_hand(pid, t, None, [0, 0, 1, 1])
+
+        await look(1.0)
+        assert not engine.has_title(pid, "deep-work")  # one look names nothing
+        await look(2.0)
+        assert engine.has_title(pid, "deep-work")
+        assert engine.drop_title(pid, "deep-work", "put back on the shelf")  # the outlines say it went back
+        assert not engine.has_title(pid, "deep-work") and engine.carts()[0]["total"] == 0
+        await look(3.0)
+        assert not engine.has_title(pid, "deep-work")  # one reading does not undo a return
+        await look(4.0)
+        assert engine.has_title(pid, "deep-work") and engine.carts()[0]["total"] == 59
+        lines = [(l["name"], l["state"]) for l in engine.carts()[0]["lines"]]
+        assert lines == [("Deep Work", "returned"), ("Deep Work", "in_cart")]
+        await look(5.0)
+        assert engine.carts()[0]["total"] == 59  # and never twice
+
+    asyncio.run(scenario())

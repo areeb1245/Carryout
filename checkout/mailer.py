@@ -1,6 +1,6 @@
 """
-The invoice by email, through Resend, once a walk-out payment has gone through: a thank-you, the things bought,
-the total, and a goodbye.
+The invoice by email, through Resend, once a walk-out payment has gone through: a thank-you, the things bought with
+their category and section, the total, the link to the invoice on the payment provider's side, and a goodbye.
 
 With the default sender (`onboarding@resend.dev`) Resend only delivers to the address that owns the Resend account;
 any other recipient is refused with a 403 until a domain is verified. That refusal is reported, not hidden.
@@ -48,15 +48,18 @@ class Mailer:
             return {"status": "skipped", "to": to, "id": None, "message": "not an address this app may write to"}
         currency = payment["currency"].upper()
         when = datetime.now().strftime("%d %B %Y, %H:%M")
-        number = "INV-" + datetime.now().strftime("%Y%m%d") + "-" + (payment.get("id") or "000000")[-6:].upper()
-        card = f"{(payment.get('brand') or 'card').capitalize()} ending {payment.get('last4') or '····'}"
+        invoice = payment.get("invoice") or {}
+        number = invoice.get("number") or "INV-" + datetime.now().strftime("%Y%m%d") + "-" + (payment.get("id") or "000000")[-6:].upper()
+        card = payment.get("method") or f"{(payment.get('brand') or 'card').capitalize()} ending {payment.get('last4') or '····'}"
+        provider = "PayPal" if invoice else "the payment provider"
+        link_text = "View your PayPal invoice" if invoice else "View your receipt"
         cell = "padding:10px 0;border-bottom:1px solid #e6e3de"
         small = "display:block;color:#6b6862;font-size:13px"
         rows = "".join(
             f'<tr><td style="{cell}">{html.escape(item)}' + (f'<span style="{small}">{html.escape(where)}</span>' if where else "") + f'</td><td style="{cell};text-align:right;white-space:nowrap;vertical-align:top">{currency} {price:.2f}</td></tr>'
             for item, price, where in lines
         )
-        link = f'<p style="margin:16px 0 0;font-size:14px"><a href="{html.escape(payment["receipt_url"])}" style="color:#262421">Card receipt on Stripe</a></p>' if payment.get("receipt_url") else ""
+        link = f'<p style="margin:16px 0 0;font-size:14px"><a href="{html.escape(payment["receipt_url"])}" style="color:#1f5c45;font-weight:600">{link_text}</a></p>' if payment.get("receipt_url") else ""
         muted = "color:#6b6862;font-size:14px"
         body = f"""<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#262421;max-width:480px;margin:0 auto;padding:32px 16px;font-size:16px;line-height:1.5">
 <h1 style="font-family:Georgia,serif;font-weight:500;font-size:26px;margin:0 0 8px">Thank you for purchasing with us</h1>
@@ -64,13 +67,13 @@ class Mailer:
 <p style="margin:0 0 4px;{muted}">Invoice {number} · {when}</p>
 <table style="width:100%;border-collapse:collapse">{rows}
 <tr><td style="padding:12px 0;font-weight:600">Total paid</td><td style="padding:12px 0;text-align:right;font-weight:600;white-space:nowrap">{currency} {payment['amount']:.2f}</td></tr></table>
-<p style="margin:8px 0 0;{muted}">Paid with {html.escape(card)}.</p>{link}
+<p style="margin:8px 0 0;{muted}">Paid with {html.escape(card)} through {provider}.</p>{link}
 <p style="margin:32px 0 0">Looking forward to meeting you again.</p>
-<p style="margin:24px 0 0;{muted}">This invoice comes from a demo running on Stripe's sandbox. No money moved.</p></div>"""
+<p style="margin:24px 0 0;{muted}">This invoice comes from a demo running on a payment sandbox. No money moved.</p></div>"""
         text = f"Thank you for purchasing with us\n\nHello {name}, these are the things you bought today.\n\nInvoice {number} · {when}\n\n"
         text += "\n".join(f"{item}{f' ({where})' if where else ''}  {currency} {price:.2f}" for item, price, where in lines)
-        text += f"\n\nTotal paid  {currency} {payment['amount']:.2f}\nPaid with {card}.\n"
-        text += (f"Card receipt: {payment['receipt_url']}\n" if payment.get("receipt_url") else "") + "\nLooking forward to meeting you again.\n\nThis invoice comes from a demo running on Stripe's sandbox. No money moved.\n"
+        text += f"\n\nTotal paid  {currency} {payment['amount']:.2f}\nPaid with {card} through {provider}.\n"
+        text += (f"{link_text}: {payment['receipt_url']}\n" if payment.get("receipt_url") else "") + "\nLooking forward to meeting you again.\n\nThis invoice comes from a demo running on a payment sandbox. No money moved.\n"
         subject = f"Thank you for your purchase: invoice {number}"
         try:
             r = await self.http.post(

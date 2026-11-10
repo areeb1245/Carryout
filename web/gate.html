@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>The gate</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231f5c45'/%3E%3Cpath d='M4 5h8l-1 6H5z' fill='none' stroke='%23fff' stroke-width='1.4'/%3E%3C/svg%3E" />
+    <link rel="preload" href="/static/fonts/newsreader-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <span class="brand" id="brand">Shop</span>
+      <p class="status" role="status"><span class="dot" id="gate-dot"></span><span id="gate-status">Starting the gate</span></p>
+    </header>
+
+    <main class="gate">
+      <div>
+        <div class="lens" id="lens">
+          <video id="camera" playsinline muted autoplay></video>
+          <img id="photo" alt="The picture the gate is looking at" hidden />
+          <div class="seen" id="seen"><span id="seen-name"></span></div>
+          <div class="lens-note" id="lens-note">
+            <p>The gate needs to see you to let you in.</p>
+            <button type="button" class="primary" id="use-camera">Turn on the camera</button>
+          </div>
+        </div>
+        <div class="lens-foot">
+          <select id="camera-pick" aria-label="Which camera the gate uses" hidden></select>
+          <button type="button" class="quiet" id="use-photo">No camera? Use a photo</button>
+          <button type="button" class="quiet" id="back-to-camera" hidden>Back to the camera</button>
+          <input type="file" id="photo-file" accept="image/*" hidden />
+        </div>
+      </div>
+
+      <div class="panel" id="panel" aria-live="polite"></div>
+    </main>
+
+    <p class="foot">This is a demo on PayPal's sandbox. Use test details only: no real card is charged and no money moves.</p>
+
+    <script src="/static/gate.js" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{title}}</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="returned {{state}}">
+      <h1>{{title}}</h1>
+      <p>{{text}}</p>
+    </main>
+    <script>
+      // opened by the gate as a small window: it has done its job, so it closes itself
+      if (window.opener) setTimeout(() => window.close(), 1800);
+    </script>
+  </body>
+</html>

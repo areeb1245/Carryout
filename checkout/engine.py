@@ -177,6 +177,8 @@ class Entry:
     why: str = ""
     looks: list = field(default_factory=list)  # (holding, product id or None) per look
     paid: str | None = None  # id of the payment that covered this line
+    audit: str | None = None  # the check before charging: kept | put_back | unclear, None if it has not run
+    audit_why: str = ""
 
 
 class Engine:
@@ -783,6 +785,8 @@ class Engine:
             return False
         if entry.paid:
             return True
+        if entry.audit in ("put_back", "unclear"):
+            return False  # the last check before charging did not see them leave with it
         if product.family:
             # which member of a family it is rests on reading it: no confirmed reading, no bill. And one bill per
             # title per shopper: a second line with the same title is the same item seen under another track.
@@ -808,6 +812,8 @@ class Engine:
             "verified": entry.verified,
             "why": entry.why,
             "paid": entry.paid,
+            "audit": entry.audit,
+            "audit_why": entry.audit_why,
             "id": entry.id,
             "item": entry.item.id,
             "product": product.id if product else None,
@@ -997,6 +1003,10 @@ class Engine:
         self._emit("pick", person=pid, entry=entry.id, item=ghost.id, origin="seen", confidence=entry.confidence)
         return True
 
+    def has_title(self, pid: int, product_id: str) -> bool:
+        """Is this title on the shopper's cart right now?"""
+        return any(e.person == pid and e.state == "in_cart" and e.item.settled == product_id for e in self.entries)
+
     def drop_title(self, pid: int, product_id: str, how: str) -> bool:
         """The shopper is no longer carrying this title (it has stopped showing up in their hands): off the cart."""
         for entry in self.entries:
@@ -1082,6 +1092,14 @@ class Engine:
         if verdict != entry.verified:
             entry.verified, entry.why = verdict, why[:160]
             self._emit("verify", person=entry.person, entry=entry.id, item=item.id, verdict=verdict or "unsettled", why=entry.why, looks=len(entry.looks))
+
+    def apply_audit(self, entry_id: int, verdict: str, why: str = "") -> None:
+        """The check before charging has looked at a line: kept (charge it), put_back or unclear (do not)."""
+        entry = next((e for e in self.entries if e.id == entry_id), None)
+        if entry is None or entry.paid:
+            return
+        entry.audit, entry.audit_why = verdict, why[:160]
+        self._emit("audit", person=entry.person, entry=entry.id, item=entry.item.id, verdict=verdict, why=entry.audit_why)
 
     def unpaid(self, pid: int) -> list[Entry]:
         return [e for e in self.entries if e.person == pid and not e.paid and self._chargeable(e)]

@@ -1,39 +1,49 @@
 """
-The live app: serves the page, takes frames from the browser over a WebSocket, answers with checkout states.
+The live app: two screens and the calls behind them.
 
     uv run uvicorn checkout.server:app --port 8765
 
-Browser -> server   {"type": "start", "shop": "bookshop", "catalog": {...}, "auto_checkin": bool}   new visit; `catalog` overrides the shop file
-                    {"type": "frame", "seq": n, "t": seconds}   then one binary message: the JPEG
-                    {"type": "checkin", "person": id, "name": "...", "email": "...", "card": "pm_card_visa"}
-                    {"type": "end"}                             the footage is over: everyone walks out and pays
-Server -> browser   {"type": "ready", session}
-                    {"type": "state", ...}       one per frame, in frame order: people, hands, items, events, carts, meta
-                    {"type": "update", ...}      between frames: a check-in, a second look or a payment came through
-                    {"type": "finished", ...}    after "end", once every payment has been attempted
-                    {"type": "lost", seq, error} the model call for that frame failed
+The gate (/gate, or gate.localhost:8765)   where a shopper is recognised or registers, and is let in
+    POST /api/gate/look        one camera frame (a JPEG) -> who this is: no_face | closer | known | new
+    POST /api/gate/register    a new face plus name, email and a payment method -> admitted, or a PayPal address to approve at
+    GET  /gate/return          where PayPal sends the shopper back after approving
+    GET  /api/gate/progress/x  has that approval come through yet?
+    POST /api/gate/admit       a recognised face with a method on file -> an open visit
 
-Every key (SAM, the verifier, Stripe) stays in this process. The server listens on localhost only.
+The shop floor (/)   frames from the browser over a WebSocket, checkout states back
+    Browser -> server   {"type": "start", "shop": "bookshop", "catalog": {...}, "dry": bool}   new visit; `catalog` overrides the shop file
+                        {"type": "frame", "seq": n, "t": seconds}   then one binary message: the JPEG
+                        {"type": "end"}                             the footage is over: everyone walks out and pays
+    Server -> browser   {"type": "ready", session}
+                        {"type": "state", ...}       one per frame, in frame order: people, hands, items, events, carts, meta
+                        {"type": "update", ...}      between frames: a face, a second look, the last check or a payment came through
+                        {"type": "finished", ...}    after "end", once every payment has been attempted
+                        {"type": "lost", seq, error} the model call for that frame failed
+
+Every key (SAM, the verifier, PayPal, the database) stays in this process. The server listens on localhost only.
 """
 from __future__ import annotations
 
 import asyncio
 import dataclasses
+import html
 import json
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .catalog import Catalog
+from .gate import Gate, decode
 from .identity import Profiles
 from .mailer import Mailer
 from .payments import TEST_CARDS, Payments
 from .pipeline import Services, Session
 from .reader import Reader
 from .sam_client import MAX_FPS, MAX_PROMPTS, ROOT, SamClient
+from .vectors import FaceIndex
 from .verify import Verifier
 
 log = logging.getLogger("checkout")
@@ -47,12 +57,18 @@ MAX_IN_FLIGHT = 6
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    services = Services(SamClient(), Verifier(), Profiles(), Payments(), Mailer(), Reader())
+    index = FaceIndex()
+    payments = Payments()
+    services = Services(SamClient(), Verifier(), Profiles(provider=payments.name, index=index), payments, Mailer(), Reader())
     app.state.services = services
+    app.state.sessions = {}  # the last few visits, so the page can fetch the pictures a bag was checked against
+    app.state.gate = Gate(services.faces, payments, Catalog.load(shop_file(DEFAULT_SHOP)).name)
     yield
     await services.sam.close()
     await services.verifier.close()
     await services.mailer.close()
+    await payments.close()
+    index.close()
 
 
 app = FastAPI(title="SAM 3.1 checkout", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -71,8 +87,56 @@ def sample_list() -> list[dict]:
 
 
 @app.get("/")
-def index():
-    return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-store"})
+def index(request: Request):
+    # gate.localhost:8765 is the gate's own address; everything else gets the shop floor
+    page = "gate.html" if request.headers.get("host", "").lower().startswith("gate.") else "index.html"
+    return FileResponse(WEB / page, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/gate")
+def gate_page():
+    return FileResponse(WEB / "gate.html", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/gate/look")
+async def gate_look(request: Request):
+    jpeg = await request.body()
+    if len(jpeg) > MAX_FRAME_BYTES:
+        return JSONResponse({"status": "error", "message": "That picture is too large."}, status_code=413)
+    return await app.state.gate.look(decode(jpeg))
+
+
+@app.post("/api/gate/register")
+async def gate_register(request: Request, body: dict):
+    card = body.get("card") if isinstance(body.get("card"), dict) else None
+    # PayPal sends the shopper back to this server; "localhost" because it will not take a made-up host name
+    back = f"http://localhost:{request.url.port or 80}"
+    return await app.state.gate.register(
+        ticket=body.get("ticket"), token=body.get("pass"), name=str(body.get("name", "")), email=str(body.get("email", "")),
+        method=str(body.get("method", "paypal")), test_card=str(body.get("test_card", "")), card=card, return_base=back,
+    )
+
+
+@app.get("/api/gate/progress/{reg}")
+async def gate_progress(reg: str):
+    return app.state.gate.progress(reg)
+
+
+@app.post("/api/gate/admit")
+async def gate_admit(body: dict):
+    return app.state.gate.admit(body.get("pass"))
+
+
+@app.get("/gate/return")
+async def gate_return(reg: str = "", cancelled: str = ""):
+    """PayPal sends the shopper here after the approval window. The gate screen is still open in the other window
+    and picks the result up by itself; this page only says what happened."""
+    result = await app.state.gate.approved(reg, cancelled=bool(cancelled))
+    done = result["status"] == "admitted"
+    title = "PayPal is set up" if done else "PayPal was not set up"
+    text = "You can close this window and walk in." if done else html.escape(result.get("message", "Please try again at the gate."))
+    page = (WEB / "return.html").read_text().replace("{{title}}", title).replace("{{text}}", text).replace("{{state}}", "ok" if done else "bad")
+    return HTMLResponse(page, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/config")
@@ -90,6 +154,7 @@ async def config(shop: str = DEFAULT_SHOP):
         "test_cards": TEST_CARDS,
         "services": services.status(),
         "profiles": services.faces.all(),
+        "gate_url": "/gate",
     }
 
 
@@ -127,9 +192,19 @@ async def face(profile_id: str):
     return Response(picture, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/evidence/{session}/{person}/{n}")
+async def evidence(session: str, person: int, n: int):
+    """One of the pictures the last check before charging was shown for this shopper."""
+    held = app.state.sessions.get(session)
+    shots = held.shown.get(person, []) if held else []
+    if not 0 <= n < len(shots):
+        return Response(status_code=404)
+    return Response(shots[n], media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+
 @app.delete("/api/profiles")
 async def forget():
-    """Delete every profile kept on this machine: faces, card links and visit history. Stripe's sandbox keeps its customers."""
+    """Delete every profile: faces (here and in the vector index), payment links and visit history. PayPal's sandbox keeps its vault."""
     return {"forgotten": app.state.services.faces.forget_all()}
 
 
@@ -182,15 +257,14 @@ async def ws(socket: WebSocket):
                     catalog = Catalog.from_dict(data["catalog"]) if data.get("catalog") else Catalog.load(shop_file(str(data.get("shop", ""))) or shop_file(DEFAULT_SHOP))
                     # "dry": everything runs except the charge and the email, for trying footage out
                     used = dataclasses.replace(services, payments=None, mailer=None) if data.get("dry") else services
-                    session = Session(used, catalog, outbox, auto_checkin=bool(data.get("auto_checkin", False)))
+                    session = Session(used, catalog, outbox, dry=bool(data.get("dry")))
+                    app.state.sessions[session.id] = session
+                    for old in list(app.state.sessions)[:-6]:
+                        del app.state.sessions[old]
                     pending, ending = None, False
                     outbox.put_nowait({"type": "ready", "session": session.id, "services": services.status()})
                 elif kind == "frame":
                     pending = data
-                elif kind == "checkin" and session:
-                    problem = session.check_in(int(data.get("person", 0)), str(data.get("name", "")), str(data.get("card", "")), str(data.get("email", "")))
-                    if problem:
-                        outbox.put_nowait({"type": "refused", "session": session.id, "person": data.get("person"), "message": problem})
                 elif kind == "end" and session:
                     ending = True
                     wake.set()

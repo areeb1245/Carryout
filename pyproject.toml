@@ -10,8 +10,8 @@ dependencies = [
     "numpy>=1.26",
     "opencv-python-headless>=4.9",
     "scipy>=1.11",
-    "stripe>=16.1.0",
     "rapidocr-onnxruntime>=1.4.4",
+    "psycopg[binary]>=3.2",
 ]
 
 [dependency-groups]

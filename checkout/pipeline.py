@@ -4,15 +4,17 @@ One shop visit, start to finish: frames in, checkout states out, with the side j
 The frame loop    `submit` queues a frame and asks SAM at once; `next_state` hands back engine states strictly in the
                   order the frames were submitted, because the engine's logic is a timeline and answers can overtake
                   each other on the network.
-Beside the loop   Faces       each shopper's face is read locally and matched to the saved profiles. A known face
-                              pulls up its profile and card; a new face is reported so the page can ask for a card.
-                  Check-in    a new face plus a card becomes a profile: a row in SQLite and a Stripe customer.
+Beside the loop   Faces       each shopper's face is read locally and matched to the saved profiles. Someone the
+                              gate let in (gate.py) has an open visit: their profile and payment method are pulled
+                              up. Anyone else is flagged as not registered, and is never charged.
                   Reading     where a shop sells many things that look alike to SAM (books), the text on each one
                               is read locally by OCR, on the shelf and again in the hand, to tell which it is.
                   Second look every pick is shown to a vision language model on up to three frames; together the
                               looks name the product or dispute the pick.
-                  Payment     when a shopper leaves, the lines that held up are charged to their card in one payment,
-                              and the receipt is emailed to the address on their profile.
+                  Last check  when a shopper leaves, one call shows the second model their bill and the pictures
+                              of them carrying things. Line by line it answers kept, put back or unclear.
+                  Payment     the lines it answered "kept" for are charged to the saved method in one payment. An
+                              invoice is written with the provider and emailed to the address on their profile.
 
 Side jobs never block the frame loop. What they find goes to `outbox` as `update` messages.
 """
@@ -29,9 +31,9 @@ import numpy as np
 
 from .catalog import Catalog
 from .engine import Config, Engine
-from .identity import MATCH, Face, Profile, Profiles
-from .mailer import Mailer, valid_email
-from .payments import ROTATION, TEST_CARDS, Card, Payments
+from .identity import MATCH, Profile, Profiles
+from .mailer import Mailer
+from .payments import Card, Payments
 from .reader import Reader, squash
 from .sam_client import SamClient, load_env
 from .verify import Verifier
@@ -50,6 +52,8 @@ HAND_GONE_S = 4.0
 READ_TRIES = 3  # attempts at reading a shelf item's text
 READ_RETRY_S = 2.5
 VERIFY_WAIT_S = 10.0
+VIEW_GAP_S = 1.0  # how often a carrying shopper's picture is kept for the check before charging
+AUDIT_PICTURES = 5
 
 
 @dataclass
@@ -62,7 +66,7 @@ class Services:
     payments: Payments | None = None
     mailer: Mailer | None = None
     reader: Reader | None = None
-    demo_email: str = ""  # goes on the profiles that hands-free mode creates
+    demo_email: str = ""  # prefilled in the gate's registration form
 
     def __post_init__(self):
         self.demo_email = self.demo_email or load_env().get("DEMO_EMAIL", "")
@@ -71,7 +75,9 @@ class Services:
         return {
             "verifier": bool(self.verifier and self.verifier.enabled),
             "faces": bool(self.faces and self.faces.ready),
+            "face_search": "pgvector" if self.faces and self.faces.index else "local",
             "payments": bool(self.payments and self.payments.enabled),
+            "provider": getattr(self.payments, "name", "") if self.payments else "",
             "payments_note": self.payments.problem if self.payments else "payments are not set up",
             "email": bool(self.mailer and self.mailer.enabled),
             "reader": bool(self.reader and self.reader.ready),
@@ -80,23 +86,23 @@ class Services:
 
 
 class Session:
-    def __init__(self, services: Services, catalog: Catalog, outbox: asyncio.Queue | None = None, auto_checkin: bool = True, cfg: Config | None = None, threshold: float = 0.3):
+    def __init__(self, services: Services, catalog: Catalog, outbox: asyncio.Queue | None = None, dry: bool = False, cfg: Config | None = None, threshold: float = 0.3):
         self.id = uuid.uuid4().hex[:12]
         self.services = services
         self.sam = services.sam
         self.catalog = catalog
         self.engine = Engine(catalog, cfg)
         self.threshold = threshold
-        self.auto_checkin = auto_checkin
+        self.dry = dry  # a rehearsal: everything runs except the charge, the invoice and the email
         self.outbox = outbox or asyncio.Queue()
         self.queue: asyncio.Queue = asyncio.Queue()
         self.last_zone_t: float | None = None
-        self.who: dict[int, Profile] = {}  # person track -> customer profile
-        self.best_face: dict[int, Face] = {}
-        self.looks: dict[int, int] = {}  # how many times a face was read without matching any profile
-        self.enrolling: set[int] = set()
-        self.enrol_jobs: dict[int, asyncio.Task] = {}
-        self.notes: dict[int, str] = {}  # why a shopper has no card, if a check-in failed
+        self.who: dict[int, Profile] = {}  # person track -> the profile of someone the gate let in
+        self.looks: dict[int, int] = {}  # how many times a face was read without matching an open visit
+        self.strangers: dict[int, str] = {}  # not registered: "" for an unknown face, else the name of a profile that did not come through the gate
+        self.evidence: dict[int, dict] = {}  # per shopper: pictures of them carrying things, for the last check
+        self.checking: set[int] = set()  # shoppers whose bill is with the second model right now
+        self.shown: dict[int, list[bytes]] = {}  # the pictures the last check was shown, as JPEGs, for the page
         self.jobs: set[asyncio.Task] = set()
         self.checks: dict[int, set[asyncio.Task]] = {}  # second looks still running, by person
         self.payments: dict[int, list[dict]] = {}
@@ -155,7 +161,7 @@ class Session:
         self.frames_seen += 1
         first = len(self.engine.events)
         self._faces(frame, state)
-        self._auto_check_in(state)
+        self._keep_views(t, frame, state)
         for event in state["events"]:
             if event["type"] in ("pick", "handover"):
                 picked = self.engine.items.get(event["item"])
@@ -195,24 +201,24 @@ class Session:
             self.outbox.put_nowait({"type": "update", "session": self.id, "t": round(self.engine.t, 3), "events": self.engine.events[first_event:], "carts": self.engine.carts(), "meta": self.meta()})
 
     def meta(self) -> dict:
-        """Who each tracked person is, for the page: their profile, or that their face is new."""
+        """Who each tracked person is, for the page: their profile, or that they are not registered."""
         book = self.services.faces
         people = {}
         for person in self.engine.people.people.values():
             pid = person.id
             if pid in self.who:
-                people[pid] = {"status": "known", "profile": book.summary(self.who[pid]), "note": self.notes.get(pid, "")}
-            elif pid in self.enrolling:
-                people[pid] = {"status": "checking_in"}
-            elif self.looks.get(pid, 0) >= 2:
-                people[pid] = {"status": "new_face"}
+                people[pid] = {"status": "known", "profile": book.summary(self.who[pid])}
+            elif pid in self.strangers:
+                people[pid] = {"status": "not_registered", "name": self.strangers[pid]}
             else:
                 people[pid] = {"status": "no_face"}
+            if pid in self.checking:
+                people[pid]["checking"] = True
         stock = [i for i in self.engine.items.values() if i.state == "rest" and self.catalog.family_of(i.seen_as)]
         shelf = {"items": len(stock), "read": sum(1 for i in stock if i.settled)} if stock else None
-        return {"people": people, "payments": {pid: made[-1] for pid, made in self.payments.items() if made}, "shelf": shelf}
+        return {"people": people, "payments": {pid: made[-1] for pid, made in self.payments.items() if made}, "shelf": shelf, "dry": self.dry}
 
-    # faces and check-in
+    # faces: who came through the gate
 
     def _faces(self, frame: np.ndarray, state: dict) -> None:
         book = self.services.faces
@@ -234,77 +240,89 @@ class Session:
             known = self.who.get(pid)
             if known:
                 if not known.templates or MATCH <= book.score(known, face) < 0.7:
-                    book.learn(known, face)  # a new angle, or a profile opened before the face was visible
-                continue
-            if pid not in self.best_face or face.quality > self.best_face[pid].quality:
-                self.best_face[pid] = face
-            if pid in self.enrolling:
+                    book.learn(known, face)  # a new angle
                 continue
             match = book.who(face, skip=taken)
-            if match:
+            if match and book.open_visit(match[0]) is not None:
                 taken.add(match[0].id)
-                self._link(pid, match[0], "recognised", match[1])
-            else:
-                self.looks[pid] = self.looks.get(pid, 0) + 1
+                self.strangers.pop(pid, None)
+                self._link(pid, match[0], match[1])
+                continue
+            # No open visit: an unknown face, or a profile that has not come through the gate this time. Two looks
+            # before saying so, as one poor view of a registered face can miss.
+            self.looks[pid] = self.looks.get(pid, 0) + 1
+            name = match[0].name if match else ""
+            if self.looks[pid] >= 2 and self.strangers.get(pid) != name:
+                first_time = pid not in self.strangers
+                self.strangers[pid] = name
+                if first_time:
+                    self.engine.note("unregistered", person=pid, name=name)
 
-    def _link(self, pid: int, profile: Profile, how: str, score: float | None = None) -> None:
+    def _link(self, pid: int, profile: Profile, score: float | None = None) -> None:
         self.who[pid] = profile
         extra = {} if score is None else {"score": round(score, 2)}
-        self.engine.note("checkin", person=pid, name=profile.name, how=how, brand=profile.brand, last4=profile.last4, face=bool(profile.templates), **extra)
+        method = self.services.faces.summary(profile)["method"]
+        self.engine.note("checkin", person=pid, name=profile.name, how="recognised", method=method, **extra)
 
-    def _auto_check_in(self, state: dict) -> None:
-        """Hands-free demo mode: a face no profile matches gets a profile and a test card without anyone asking."""
-        if not self.auto_checkin or self.services.faces is None:
+    # pictures for the last check
+
+    @staticmethod
+    def _crop(frame: np.ndarray, box: list[float], grow: float = 0.0) -> np.ndarray:
+        h, w = frame.shape[:2]
+        bw, bh = box[2] - box[0], box[3] - box[1]
+        x0, y0 = int(max(0.0, box[0] - grow * bw) * w), int(max(0.0, box[1] - grow * bh) * h)
+        x1, y1 = int(min(1.0, box[2] + grow * bw) * w), int(min(1.0, box[3] + grow * bh) * h)
+        return frame[y0:max(y1, y0 + 2), x0:max(x1, x0 + 2)].copy()
+
+    def _carrying_view(self, pid: int, frame: np.ndarray, state: dict, person_box: list[float]) -> np.ndarray:
+        """A picture of what this shopper has in their hands: their hands and the items in them with room around,
+        or the whole shopper when no hand is outlined in this frame."""
+        boxes = [h["box"] for h in state["hands"] if h.get("person") == pid]
+        boxes += [i["box"] for i in state["items"] if i["state"] == "held" and i.get("holder") == pid]
+        if not boxes:
+            return self._crop(frame, person_box, 0.05)
+        x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+        x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+        # never tighter than a good part of the shopper: the model should see whose hands these are
+        pw, ph = person_box[2] - person_box[0], person_box[3] - person_box[1]
+        need_w, need_h = max(0.0, 0.6 * pw - (x1 - x0)) / 2, max(0.0, 0.45 * ph - (y1 - y0)) / 2
+        return self._crop(frame, [x0 - need_w, y0 - need_h, x1 + need_w, y1 + need_h], 0.35)
+
+    def _keep_views(self, t: float, frame: np.ndarray, state: dict) -> None:
+        """Keep the latest couple of pictures of every shopper who has something on their bill: the last check
+        wants to see what they still had on the way out."""
+        verifier = self.services.verifier
+        if verifier is None or not verifier.enabled:
             return
-        since = {cart["person"]: cart["since"] for cart in state["carts"]}
         for person in state["people"]:
             pid = person["id"]
-            if pid in self.who or pid in self.enrolling:
+            memo = self.evidence.setdefault(pid, {"read": {}, "recent": []})
+            if memo["recent"] and 0 <= t - memo["recent"][-1][0] < VIEW_GAP_S:
                 continue
-            age = state["t"] - since[pid] if since.get(pid) is not None else 0.0
-            # two looks give a known face the chance to be recognised first; with no face in view, go on the track alone
-            if self.looks.get(pid, 0) >= 2 or age >= 3.0:
-                n = len(self.services.faces.profiles)
-                self.check_in(pid, "Demo shopper" if n == 0 else f"Demo shopper {n + 1}", ROTATION[n % len(ROTATION)], self.services.demo_email)
+            if not (self.engine.holding(pid) or self.engine.unpaid(pid)):
+                continue
+            memo["recent"].append((t, self._carrying_view(pid, frame, state, person["box"])))
+            del memo["recent"][:-2]
+            memo["scene"] = (t, frame)  # and the whole picture, shelves included, the last time they were seen
 
-    def check_in(self, pid: int, name: str, test_card: str, email: str = "") -> str:
-        """Open a profile for a tracked person: their face as the camera has it, plus a card and an email address.
-        Returns "" when the check-in has started, else why it cannot."""
-        if self.services.faces is None:
-            return "Profiles are not set up."
-        if pid in self.who or pid in self.enrolling:
-            return "This shopper is already checked in."
-        if pid not in self.engine.people.people:
-            return "This shopper is no longer tracked."
-        if test_card not in TEST_CARDS:
-            return "Choose one of the test cards."
-        if email.strip() and not valid_email(email):
-            return "That email address cannot be used."
-        self.enrolling.add(pid)
-        self.enrol_jobs[pid] = self._spawn(self._enrol(pid, name, test_card, email.strip()))
-        return ""
+    def _pictures(self, pid: int, entries: list) -> list[tuple[float, np.ndarray]]:
+        """What the last check is shown, oldest first: for each line the picture in which that item was read in
+        their hands, then the latest close view of their hands, then the whole scene the last time they were seen."""
+        memo = self.evidence.get(pid)
+        if not memo:
+            return []
+        chosen = {}
+        for entry in entries:
+            hit = memo["read"].get(entry.item.cls)
+            if hit:
+                chosen[hit[0]] = hit[1]
+        ending = [view for view in memo["recent"] if view[0] not in chosen][-1:]
+        if memo.get("scene"):
+            ending.append(memo["scene"])
+        read = sorted(chosen.items())[-(AUDIT_PICTURES - len(ending)):]
+        return read + ending
 
-    async def _enrol(self, pid: int, name: str, test_card: str, email: str = "") -> None:
-        first = len(self.engine.events)
-        book, pay = self.services.faces, self.services.payments
-        try:
-            profile = book.add(name, self.best_face.get(pid), email)
-            problem = ""
-            if pay and pay.enabled:
-                try:
-                    card = await pay.save_card(profile.name, test_card, profile.id, profile.email)
-                    book.set_card(profile, card.customer, card.payment_method, card.brand, card.last4)
-                except Exception as e:
-                    problem = f"Card not saved: {str(e)[:120] or type(e).__name__}"
-            else:
-                problem = pay.problem if pay else "Payments are not set up."
-            self._link(pid, profile, "new")
-            if problem:
-                self.notes[pid] = problem
-        finally:
-            self.enrolling.discard(pid)
-            self._update(first)
-
+    # second look
     # second look
 
     def _could_be(self, item) -> tuple[list, list]:
@@ -329,12 +347,12 @@ class Session:
             elif item and t >= job["next_t"]:
                 job["looks"] += 1
                 job["next_t"] = t + (LOOK_GAP_S if job["looks"] < LOOKS else 2 * LOOK_GAP_S)
-                task = self._spawn(self._look(entry_id, job["item"], frame, item["polygons"], item["box"]))
+                task = self._spawn(self._look(entry_id, job["item"], frame, item["polygons"], item["box"], job["person"], t))
                 pending = self.checks.setdefault(job["person"], set())
                 pending.add(task)
                 task.add_done_callback(pending.discard)
 
-    async def _look(self, entry_id: int, item_id: int, frame: np.ndarray, polygons: list, box: list[float]) -> None:
+    async def _look(self, entry_id: int, item_id: int, frame: np.ndarray, polygons: list, box: list[float], pid: int | None = None, t: float = 0.0) -> None:
         verifier, reader = self.services.verifier, self.services.reader
         item = self.engine.items.get(item_id)
         if item is None:
@@ -349,6 +367,9 @@ class Session:
             agree = bool(reading and reading.product and reading.score >= 0.6 and verdict["product"] == reading.product.id)
             why = f'Reads "{reading.quote()}", and the second model agrees' if agree else verdict["why"]
             self.engine.apply_look(entry_id, verdict["holding"], verdict["product"], why, weight=2 if agree else 1)
+            if verdict["holding"] and verdict["product"] and pid is not None:
+                # a picture in which this item was seen in their hand, for the check before charging
+                self.evidence.setdefault(pid, {"read": {}, "recent": []})["read"][verdict["product"]] = (t, self._crop(frame, box, 1.5))
         elif reading and reading.sure:
             self.engine.apply_look(entry_id, True, reading.product.id, f'Reads "{reading.quote()}"', weight=2)
         self._update(first)
@@ -410,12 +431,12 @@ class Session:
                 continue  # nothing taken yet: nothing to ask about
             self.hand_asks[pid] = (asked + 1, t)
             self.asking[pid] = self.asking.get(pid, 0) + 1
-            task = self._spawn(self._ask_hand(pid, t, frame, person["box"]))
+            task = self._spawn(self._ask_hand(pid, t, frame, person["box"], self._carrying_view(pid, frame, state, person["box"])))
             pending = self.checks.setdefault(pid, set())
             pending.add(task)
             task.add_done_callback(pending.discard)
 
-    async def _ask_hand(self, pid: int, t: float, frame: np.ndarray, box: list[float]) -> None:
+    async def _ask_hand(self, pid: int, t: float, frame: np.ndarray, box: list[float], view: np.ndarray | None = None) -> None:
         try:
             books = [p for group in self.catalog.members.values() for p in group]
             answer = await self.services.verifier.carried(frame, box, books)
@@ -425,8 +446,15 @@ class Session:
             self.hand_seen_t[pid] = max(t, self.hand_seen_t.get(pid, -1.0))
             engine, first = self.engine, len(self.engine.events)
             seen = self.carried.setdefault(pid, {})
+            kept = self.evidence.setdefault(pid, {"read": {}, "recent": []})["read"]
             for product in answer["products"]:
+                if view is not None and t >= kept.get(product, (-1.0,))[0]:
+                    kept[product] = (t, view)  # the latest picture in which this title was read in their hands
                 memo = seen.setdefault(product, {"votes": 0, "misses": 0, "last_t": t, "on_cart": False})
+                if memo["on_cart"] and not engine.has_title(pid, product):
+                    # The outlines said it went back on the shelf, yet here it is, read in their hands. One look
+                    # is not enough to undo that: it comes back onto the cart only if a second look reads it too.
+                    memo.update(votes=0, on_cart=False)
                 memo["votes"], memo["misses"], memo["last_t"] = memo["votes"] + 1, 0, max(t, memo["last_t"])
                 if memo["votes"] >= 2 and not memo["on_cart"]:
                     why = f"Read in their hands on two looks: {answer['why']}"
@@ -516,51 +544,101 @@ class Session:
         finally:
             self.reading.discard(item_id)
 
-    # payment
+    # the last check, then payment
+
+    async def _audit(self, pid: int) -> dict:
+        """One call to the second model before any money moves: is each line on this bill something the shopper
+        really left with? Lines it does not answer "kept" for come off the charge. Returns what the page shows:
+        {status: checked | failed | skipped | nothing, kept, held}."""
+        engine, verifier = self.engine, self.services.verifier
+        entries = engine.unpaid(pid)
+        if not entries:
+            return {"status": "nothing", "kept": 0, "held": 0}
+        if verifier is None or not verifier.enabled:
+            return {"status": "skipped", "kept": len(entries), "held": 0}
+        self.checking.add(pid)
+        self._update(len(engine.events))
+        try:
+            pictures = self._pictures(pid, entries)
+            self.shown[pid] = [Verifier.lettered(image, chr(65 + i)) for i, (_, image) in enumerate(pictures)]
+            asked = []
+            for n, entry in enumerate(entries, 1):
+                product = self.catalog.by_id[entry.item.cls]
+                asked.append({"line": n, "name": product.name, **({"by": product.author} if product.author else {}), "looks_like": product.cues or product.prompt})
+            answer = None
+            for _ in range(2 if pictures else 0):
+                answer = await verifier.audit(asked, pictures)
+                if answer is not None:
+                    break
+            first = len(engine.events)
+            missing = "the check before charging got no answer" if pictures else "no picture of them carrying it was kept"
+            for n, entry in enumerate(entries, 1):
+                verdict = answer[n] if answer else {"verdict": "unclear", "why": missing}
+                engine.apply_audit(entry.id, verdict["verdict"], verdict["why"])
+            kept = sum(1 for e in entries if e.audit == "kept")
+            self._update(first)
+            return {"status": "checked" if answer else "failed", "kept": kept, "held": len(entries) - kept, "pictures": len(pictures), "session": self.id, "person": pid}
+        finally:
+            self.checking.discard(pid)
 
     async def _pay(self, pid: int) -> None:
-        # do not bill a line the second model is still looking at, or a shopper whose card is still being saved
-        pending = list(self.checks.get(pid, ())) + ([self.enrol_jobs[pid]] if pid in self.enrolling else [])
+        # do not bill a line the second model is still looking at
+        pending = list(self.checks.get(pid, ()))
         if pending:
             await asyncio.wait(pending, timeout=VERIFY_WAIT_S)
-        engine, pay = self.engine, self.services.payments
+        engine, pay, book = self.engine, self.services.payments, self.services.faces
         first = len(engine.events)
         if self.hand_asks.get(pid, (0, 0.0))[0] >= 3:
             # Their hands were read several times. A pick that never got a confirmed title from those readings is a
             # stray outline, unless the last reading said there was something it could not read.
             engine.void_unnamed(pid, engine.t, keep=self.unreadable.get(pid, 0))
+        shopper = self.who.get(pid)
+        # someone who is not registered is never charged, so there is nothing to check for them
+        check = await self._audit(pid) if shopper else {"status": "skipped", "kept": 0, "held": 0}
         entries = engine.unpaid(pid)
         lines = [engine.catalog.by_id[e.item.cls] for e in entries]
         amount = round(sum(p.price for p in lines), 2)
         billed = [(p.id, p.name, p.price) for p in lines]
-        shopper = self.who.get(pid)
-        base = {"amount": amount, "currency": self.catalog.currency.lower(), "items": len(lines), "id": None, "receipt_url": None, "message": ""}
+        detail = [(p.name, p.price, " · ".join(x for x in (p.category, p.section) if x)) for p in lines]
+        base = {"amount": amount, "currency": self.catalog.currency.lower(), "items": len(lines), "id": None, "receipt_url": None, "message": "", "check": check}
         if amount <= 0:
             payment = {**base, "status": "nothing_due"}
-        elif shopper is None or not shopper.payment_method:
-            payment = {**base, "status": "no_card", "message": "Left with unpaid items and no card on file."}
+        elif shopper is None:
+            payment = {**base, "status": "not_registered", "message": "Not registered at the gate, so nothing was charged."}
+        elif self.dry:
+            payment = {**base, "status": "dry", "message": "Rehearsal: nothing was charged and no email was sent."}
+        elif not book.can_pay(shopper):
+            payment = {**base, "status": "no_card", "message": "Left with unpaid items and no payment method on file."}
         elif pay is None or not pay.enabled:
             payment = {**base, "status": "off", "message": pay.problem if pay else "Payments are not set up."}
         else:
             visit = len(self.payments.get(pid, []))
             description = "Walk-out checkout: " + ", ".join(p.name for p in lines)
             card = Card(shopper.customer, shopper.payment_method, shopper.brand or "", shopper.last4 or "")
-            result = await pay.charge(card, amount, self.catalog.currency, description[:200], f"{self.id}-{pid}-{visit}", {"app": "sam3-supermarket", "session": self.id, "shopper": shopper.id})
+            extra = {"lines": detail} if getattr(pay, "name", "") == "paypal" else {}
+            result = await pay.charge(card, amount, self.catalog.currency, description[:200], f"{self.id}-{pid}-{visit}", {"app": "sam3-supermarket", "session": self.id, "shopper": shopper.id}, **extra)
             payment = {**base, **result}
             if result["status"] == "succeeded":
                 engine.mark_paid(entries, result["id"])
         if shopper:
-            payment.update(brand=shopper.brand, last4=shopper.last4, name=shopper.name)
-            if payment["status"] != "off":  # a dry run, or payments not set up: nothing happened worth keeping
-                self.services.faces.record_visit(shopper, self.id, payment, billed)
+            payment.update(brand=shopper.brand, last4=shopper.last4, name=shopper.name, method=book.method_name(shopper.brand, shopper.last4, shopper.payer) if book.can_pay(shopper) else "")
         self.payments.setdefault(pid, []).append(payment)
-        engine.note("payment", person=pid, payment=payment["id"], **{k: payment.get(k) for k in ("status", "amount", "currency", "items", "brand", "last4", "message")})
+        engine.note("payment", person=pid, payment=payment["id"], **{k: payment.get(k) for k in ("status", "amount", "currency", "items", "method", "message")})
         self._update(first)
+        if payment["status"] == "succeeded" and callable(getattr(pay, "invoice", None)):
+            first = len(engine.events)
+            made = await pay.invoice(shopper.name, shopper.email or "", detail, self.catalog.currency, payment["id"], self.catalog.name, f"{self.id}-{pid}-{len(self.payments[pid])}")
+            payment["invoice"] = made
+            payment["receipt_url"] = made.get("url") or payment["receipt_url"]
+            engine.note("invoice", person=pid, status=made["status"], number=made.get("number"), url=made.get("url"), message=made.get("message", ""))
+            self._update(first)
+        if shopper and not self.dry and payment["status"] != "off":  # a rehearsal, or payments not set up: nothing happened worth keeping
+            book.record_visit(shopper, self.id, payment, billed)
+            book.close_visit(shopper, self.id)  # they have left: the next visit starts at the gate
         mailer = self.services.mailer
         if payment["status"] == "succeeded" and shopper and shopper.email and mailer:
             first = len(engine.events)
-            shelf_of = {p.id: " · ".join(x for x in (p.category, p.section) if x) for p in lines}
-            sent = await mailer.receipt(shopper.email, shopper.name, [(name, price, shelf_of.get(pid_, "")) for pid_, name, price in billed], payment, f"receipt-{payment['id']}")
+            sent = await mailer.receipt(shopper.email, shopper.name, detail, payment, f"receipt-{payment['id']}")
             payment["email"] = sent
             engine.note("email", person=pid, status=sent["status"], to=sent["to"], message=sent["message"])
             self._update(first)

@@ -43,7 +43,7 @@ class Product:
 @dataclass
 class Catalog:
     products: list[Product] = field(default_factory=list)
-    currency: str = "AED"
+    currency: str = "USD"
     zones: list[str] = field(default_factory=lambda: list(DEFAULT_ZONES))
     name: str = "Shop"
     frame_width: int = 960  # longer side of the frames sent for analysis; reading titles needs more than outlines do
@@ -108,7 +108,7 @@ class Catalog:
                 products.append(Product(f"own{i}", prompt.capitalize(), prompt, 0.0, billable=False))
         zones = [str(z).strip().lower()[:80] for z in data.get("zones", DEFAULT_ZONES) if str(z).strip()]
         width = min(1920, max(640, int(data.get("frame_width") or 960)))
-        return cls(products, str(data.get("currency", "AED"))[:6], zones, str(data.get("name") or "Shop")[:40], width)
+        return cls(products, str(data.get("currency", "USD"))[:6], zones, str(data.get("name") or "Shop")[:40], width)
 
     @classmethod
     def load(cls, path: Path) -> "Catalog":

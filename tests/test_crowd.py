@@ -67,10 +67,10 @@ class FakeMailer:
 
 
 class Shop:
-    def __init__(self, tmp_path):
+    def __init__(self, tmp_path, book=None, verifier=None, dry=False):
         self.pay, self.mail = FakePayments(), FakeMailer()
-        self.book = Profiles(tmp_path / "checkout.db")
-        self.session = Session(Services(None, None, self.book, self.pay, self.mail), CATALOG)
+        self.book = book or Profiles(tmp_path / "checkout.db")
+        self.session = Session(Services(None, verifier, self.book, self.pay, self.mail), CATALOG, dry=dry)
         self.engine = self.session.engine
         self.t = 0.0
         self.labels = ["drink can", "cereal box", "drink can", "cereal box", "drink can"]
@@ -158,6 +158,7 @@ def test_walking_out_charges_what_was_kept_and_nothing_that_was_put_back(tmp_pat
         for i, pid in enumerate(ids):  # everyone has a profile and a card; shopper 0 also gave an email address
             profile = shop.book.add(f"Shopper {i}", None, "zero@example.com" if i == 0 else "")
             shop.book.set_card(profile, f"cus_{i}", f"pm_{i}", "visa", "4242")
+            shop.book.admit(profile)
             shop.session.who[pid] = profile
             profiles.append(profile)
         # the three who kept an item walk out with it; the other two stay
@@ -183,6 +184,8 @@ def test_walking_out_charges_what_was_kept_and_nothing_that_was_put_back(tmp_pat
         assert len(shop.pay.charges) == 3
         statuses = {pid: shop.session.payments[pid][-1]["status"] for pid in ids}
         assert [statuses[pid] for pid in ids] == ["succeeded", "nothing_due", "succeeded", "nothing_due", "succeeded"]
+        # everyone who walked out has left: their next visit starts at the gate again
+        assert all(shop.book.open_visit(p) is None for p in profiles)
         # the visit history says the same
         assert [shop.book.summary(p)["spent"] for p in profiles] == [3.0, 0.0, 3.0, 0.0, 3.0]
         assert shop.book.summary(profiles[0])["recent"] == ["Can"]
@@ -199,7 +202,7 @@ def test_card_declined_leaves_the_lines_unpaid(tmp_path):
         ids = play(shop)
 
         async def decline(card, amount, currency, description, key, metadata=None):
-            return {"status": "declined", "id": "pi_x", "amount": amount, "currency": "aed", "receipt_url": None, "message": "Your card was declined."}
+            return {"status": "declined", "id": "pi_x", "amount": amount, "currency": "usd", "receipt_url": None, "message": "Your card was declined."}
 
         shop.pay.charge = decline
         profile = shop.book.add("Declined", None)
@@ -209,6 +212,6 @@ def test_card_declined_leaves_the_lines_unpaid(tmp_path):
         assert shop.session.payments[ids[0]][-1]["status"] == "declined"
         assert shop.cart(ids[0])["due"] == 3.0 and not shop.cart(ids[0])["lines"][0]["paid"]
         assert shop.book.summary(profile)["unpaid"] == 3.0 and not shop.mail.sent
-        assert shop.session.payments[ids[2]][-1]["status"] == "no_card"  # walked out without ever checking in
+        assert shop.session.payments[ids[2]][-1]["status"] == "not_registered"  # walked out without coming through the gate
 
     asyncio.run(scenario())
