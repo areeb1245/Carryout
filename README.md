@@ -29,8 +29,9 @@ uv run uvicorn checkout.server:app --port 8765
 
 On the shop floor pick a shop, then the footage (a camera plugged into this computer, a sample clip or a video
 file), and press Start. **Rehearsal** runs everything except the charge, the invoice and the email. The first frame
-after the GPU has been idle waits for it to wake (up to a minute); the page says so. Each screen has its own camera
-chooser, so the gate and the shop floor can be tied to different cameras. Products are added in
+after the GPU has been idle waits for it to wake (up to a minute); the page says so. Choosing "Live camera" lists
+every camera this computer can see (the browser asks for permission first), and the gate has its own list, so the two
+stations can be tied to different cameras. Products are added in
 **Shop settings → Catalogue → Add a product**; a new product is found by the phrase you give it, or by its name.
 
 Keys live in `.env`, which git ignores:
@@ -63,6 +64,9 @@ PayPal, the database and email are each optional: without one, that part switche
   Nothing is saved until the payment method is: no method, no profile, no way in.
 - **Known face without a usable method** (for example a profile from the Stripe version): asked to add one.
 - **No camera:** "Use a photo" does the same with a picture, which is also how to try the gate on a laptop.
+
+The sign at the top of the gate reads "Gate closed" until the gate has let in the person in front of it, then
+"Gate open for" their name. It closes again as soon as they walk on or a different face steps up.
 
 The real-world version of the form is "tap a card or scan a code"; no hardware is wired up here.
 

@@ -74,36 +74,57 @@ async function loadShop(shop) {
   $("brand").textContent = name;
   document.title = `${name}: shop floor`;
   $("shop").innerHTML = S.config.shops.map((x) => `<option value="${esc(x.id)}" ${x.id === S.config.shop ? "selected" : ""}>${esc(x.name)}</option>`).join("");
-  await fillSources();
+  fillSources();
   renderCatalog(S.config.catalog);
 }
 
-// The footage list: this shop's sample clips, every camera plugged into this computer, and a video file.
-// Cameras only give their names once the browser has been allowed to use one; until then there is one plain entry.
-async function fillSources() {
+// The footage list: a live camera, this shop's sample clips, or a video file.
+function fillSources() {
   const before = $("source").value;
-  let cameras = [];
-  try {
-    cameras = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
-  } catch {
-    // no camera access in this browser: the plain entry below still lets the shopkeeper try
-  }
-  const named = cameras.filter((d) => d.label);
-  const cameraOptions = named.length
-    ? named.map((d) => `<option value="camera:${esc(d.deviceId)}">Camera: ${esc(d.label)}</option>`).join("")
-    : `<option value="camera:">This computer's camera</option>`;
   $("source").innerHTML =
-    `<optgroup label="Live">${cameraOptions}</optgroup>` +
-    `<optgroup label="Recorded">${S.config.samples.filter((x) => x.shop === S.config.shop).map((x) => `<option value="sample:${esc(x.file)}">${esc(x.title)}</option>`).join("")}` +
-    `<option value="file">${S.fileName ? `Video file: ${esc(S.fileName)}` : "A video file from this computer…"}</option></optgroup>`;
+    `<option value="camera">Live camera</option>` +
+    S.config.samples.filter((x) => x.shop === S.config.shop).map((x) => `<option value="sample:${esc(x.file)}">${esc(x.title)}</option>`).join("") +
+    `<option value="file">${S.fileName ? `Video file: ${esc(S.fileName)}` : "A video file from this computer…"}</option>`;
   const keep = [...$("source").options].find((o) => o.value === before) ?? [...$("source").options].find((o) => o.value.startsWith("sample:"));
   if (keep) $("source").value = keep.value;
+  $("camera-field").hidden = $("source").value !== "camera";
 }
-navigator.mediaDevices?.addEventListener?.("devicechange", fillSources);
+
+// Every camera this computer can see: built in, plugged in, or a phone or another computer sharing its camera.
+// A browser only gives their names once it has been allowed to use one, so `ask` turns one on for a moment to get
+// that permission. The choice is remembered for next time; the gate keeps its own choice on its own screen.
+async function listCameras(ask = false) {
+  const pick = $("camera");
+  const found = async () => {
+    try {
+      return (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    } catch {
+      return [];
+    }
+  };
+  let cameras = await found();
+  if (ask && !cameras.some((d) => d.label)) {
+    try {
+      (await navigator.mediaDevices.getUserMedia({ video: true, audio: false })).getTracks().forEach((t) => t.stop());
+      cameras = await found();
+    } catch {
+      pick.innerHTML = `<option value="">Camera access was not allowed in this browser</option>`;
+      return;
+    }
+  }
+  const named = cameras.filter((d) => d.label);
+  const before = pick.value || localStorage.getItem("floor-camera") || "";
+  pick.innerHTML = named.length
+    ? named.map((d) => `<option value="${esc(d.deviceId)}">${esc(d.label)}</option>`).join("")
+    : `<option value="">${cameras.length ? "Choose Live camera to list the cameras" : "No camera found"}</option>`;
+  if (named.some((d) => d.deviceId === before)) pick.value = before;
+}
+navigator.mediaDevices?.addEventListener?.("devicechange", () => listCameras());
 
 async function boot() {
   await loadShop();
   renderProfiles(S.config.profiles);
+  listCameras(); // names are there already if this browser has used a camera here before
   const sv = S.config.services;
   $("pay-note").textContent = sv.payments ? "Charged on the way out" : "Payments are off";
   const row = (on, text) => `<li><span class="dot ${on ? "ok" : "bad"}"></span><span>${esc(text)}</span></li>`;
@@ -198,17 +219,13 @@ async function start() {
   reset();
   try {
     if (!(await wake())) throw new Error("the camera model is not reachable");
-    if (choice.startsWith("camera:")) {
+    if (choice === "camera") {
       S.kind = "camera";
-      const id = choice.slice(7);
+      const id = $("camera").value;
       S.stream = await navigator.mediaDevices.getUserMedia({ video: { ...(id ? { deviceId: { exact: id } } : {}), width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
       video.removeAttribute("src");
       video.srcObject = S.stream;
-      if (!id) fillSources().then(() => {
-        // now that the browser allows it the cameras have names: keep the list on the one in use
-        const used = S.stream?.getVideoTracks()[0]?.getSettings().deviceId;
-        if (used && [...$("source").options].some((o) => o.value === `camera:${used}`)) $("source").value = `camera:${used}`;
-      });
+      if (!id) listCameras(); // allowed just now: the cameras have names from here on
     } else {
       S.kind = choice === "file" ? "file" : "sample";
       if (choice === "file" && !S.fileUrl) throw new Error("choose a video file first");
@@ -859,7 +876,14 @@ $("shop").onchange = async () => {
   await loadShop($("shop").value);
 };
 $("source").onchange = () => {
-  if ($("source").value === "file") $("file").click();
+  const choice = $("source").value;
+  if (choice === "file") $("file").click();
+  $("camera-field").hidden = choice !== "camera";
+  if (choice === "camera") listCameras(true);
+};
+$("camera").onchange = () => {
+  localStorage.setItem("floor-camera", $("camera").value);
+  if (S.running && !S.ended && S.kind === "camera") end(); // a different camera is a different visit
 };
 $("file").onchange = () => {
   const file = $("file").files[0];

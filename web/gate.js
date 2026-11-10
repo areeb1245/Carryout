@@ -29,10 +29,22 @@ const G = {
   popup: null,
   approveUrl: "",
   away: 0, // looks in a row without the person who was let in
+  others: 0, // looks in a row with somebody else in front of the gate
+  ok: false, // can the gate work at all: face recognition and payments are on
 };
 
 const camera = $("camera");
 const grab = document.createElement("canvas");
+
+// ---------------------------------------------------------------- the sign at the top: is the gate open?
+
+// The gate is closed until it has let in the person standing in front of it, and closes again the moment they
+// walk on or somebody else steps up. It says "open" for nobody else.
+function setGate(open) {
+  if (!G.ok) return; // the sign is saying what is switched off
+  $("gate-dot").className = `dot ${open ? "ok" : "off"}`;
+  $("gate-status").textContent = open ? `Gate open for ${G.profile?.name ?? "you"}` : "Gate closed";
+}
 
 // ---------------------------------------------------------------- the panel beside the camera
 
@@ -192,12 +204,15 @@ function letIn(profile, isNew) {
   G.mode = "in";
   G.profile = profile;
   G.away = 0;
+  G.others = 0;
   G.draft = {};
+  setGate(true);
   showIn(profile, isNew);
 }
 
 function reset() {
-  Object.assign(G, { mode: "watch", streak: { key: "", n: 0 }, ticket: null, pass: null, profile: null, faceUrl: "", draft: {}, reg: null, away: 0 });
+  Object.assign(G, { mode: "watch", streak: { key: "", n: 0 }, ticket: null, pass: null, profile: null, faceUrl: "", draft: {}, reg: null, away: 0, others: 0 });
+  setGate(false);
   showIdle();
 }
 
@@ -232,7 +247,7 @@ function frameFace(answer) {
   Object.assign(seen.style, { left: `${dx + x0 * w * scale}px`, top: `${dy + y0 * h * scale}px`, width: `${(x1 - x0) * w * scale}px`, height: `${(y1 - y0) * h * scale}px` });
   seen.classList.add("on");
   seen.classList.toggle("known", answer.status === "known");
-  $("seen-name").textContent = answer.status === "known" ? answer.profile.name : "";
+  $("seen-name").textContent = answer.status === "known" ? answer.profile.name : answer.status === "new" ? "Not registered" : "";
 }
 
 async function look() {
@@ -256,11 +271,23 @@ async function act(answer) {
   const key = `${answer.status}:${answer.profile?.id ?? answer.ticket ?? ""}`;
   G.streak = { key, n: key === G.streak.key ? G.streak.n + 1 : 1 };
   if (G.mode === "in") {
-    // stay on the welcome until they have walked on, or someone else steps up
+    // The welcome is for one person. It stays while they stand there, and goes when they walk on or when anyone
+    // else steps up: a different face is never greeted with the last shopper's name.
     const same = answer.status === "known" && answer.profile.id === G.profile?.id;
+    const someoneElse = answer.status === "new" || answer.status === "closer" || (answer.status === "known" && !same);
     G.away = same ? 0 : G.away + 1;
-    if (G.away >= 4) reset();
-    return;
+    G.others = someoneElse ? G.others + 1 : 0;
+    if (same) return setGate(true);
+    if (someoneElse) setGate(false); // closed at once; the welcome follows on the next look
+    if (G.others >= 2) {
+      const streak = G.streak;
+      reset();
+      G.streak = streak; // the newcomer has already been seen twice: carry on from there
+    } else {
+      if (G.away >= 2) setGate(false);
+      if (G.away >= 4) reset();
+      return;
+    }
   }
   if (G.mode !== "watch") return;
   if (answer.status === "no_face") return showIdle();
@@ -358,9 +385,12 @@ async function boot() {
   $("brand").textContent = shop;
   document.title = `${shop}: the gate`;
   const sv = G.config.services;
-  const ok = sv.faces && sv.payments;
-  $("gate-dot").className = `dot ${ok ? "ok" : "bad"}`;
-  $("gate-status").textContent = !sv.faces ? "Face recognition is off" : !sv.payments ? "Payments are off, so nobody can register" : "The gate is open";
+  G.ok = Boolean(sv.faces && sv.payments);
+  if (!G.ok) {
+    $("gate-dot").className = "dot bad";
+    $("gate-status").textContent = !sv.faces ? "Face recognition is off" : "Payments are off, so nobody can register";
+  }
+  setGate(false);
   showIdle();
   // a camera that was allowed before starts by itself; otherwise the shopper turns it on
   try {
@@ -371,5 +401,5 @@ async function boot() {
   setInterval(look, LOOK_MS);
 }
 
-Object.assign(window, { gate: G, gateUsePhoto: usePhoto }); // for poking at the state from the console
+Object.assign(window, { gate: G, gateUsePhoto: usePhoto, gateAct: act }); // for poking at the state from the console
 boot();
