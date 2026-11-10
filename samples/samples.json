@@ -1,0 +1,22 @@
+{
+  "49350-720.mp4": {
+    "title": "Freezer aisle: one item taken",
+    "shop": "supermarket"
+  },
+  "49343-720.mp4": {
+    "title": "Sports rack: item put back",
+    "shop": "supermarket"
+  },
+  "49349-720.mp4": {
+    "title": "Freezer aisle: phone only, nothing taken",
+    "shop": "supermarket"
+  },
+  "books-shelf.mp4": {
+    "title": "Your bookshelf (still photo): reads the titles",
+    "shop": "bookshop"
+  },
+  "IMG_6401.MOV": {
+    "title": "Your clip: three books taken",
+    "shop": "bookshop"
+  }
+}

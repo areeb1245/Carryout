@@ -1,0 +1,400 @@
+{
+  "name": "Bookshop",
+  "currency": "AED",
+  "frame_width": 1600,
+  "products": [
+    {
+      "id": "elon-musk",
+      "name": "Elon Musk",
+      "prompt": "book",
+      "price": 79.0,
+      "author": "Ashlee Vance",
+      "cues": "black spine, large white title",
+      "category": "Books",
+      "section": "Biography",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "shoe-dog",
+      "name": "Shoe Dog",
+      "prompt": "book",
+      "price": 65.0,
+      "author": "Phil Knight",
+      "cues": "black spine, white title, orange swoosh",
+      "category": "Books",
+      "section": "Biography",
+      "meta": {
+        "format": "Paperback",
+        "language": "English",
+        "publisher": "Simon & Schuster"
+      }
+    },
+    {
+      "id": "before-you-start-up",
+      "name": "Before You Start Up",
+      "prompt": "book",
+      "price": 55.0,
+      "author": "Pankaj Goyal",
+      "cues": "blue spine, white title",
+      "category": "Books",
+      "section": "Business and strategy",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "blue-ocean-strategy",
+      "name": "Blue Ocean Strategy",
+      "prompt": "book",
+      "price": 95.0,
+      "author": "W. Chan Kim and Renee Mauborgne",
+      "cues": "tall blue hardback, yellow title",
+      "category": "Books",
+      "section": "Business and strategy",
+      "meta": {
+        "format": "Hardback",
+        "language": "English",
+        "publisher": "Harvard Business Review Press"
+      }
+    },
+    {
+      "id": "freakonomics",
+      "name": "Freakonomics",
+      "prompt": "book",
+      "price": 55.0,
+      "author": "Steven D. Levitt and Stephen J. Dubner",
+      "cues": "orange spine, green author band",
+      "category": "Books",
+      "section": "Business and strategy",
+      "meta": {
+        "format": "Paperback",
+        "language": "English",
+        "publisher": "Harper"
+      }
+    },
+    {
+      "id": "leaders-eat-last",
+      "name": "Leaders Eat Last",
+      "prompt": "book",
+      "price": 69.0,
+      "author": "Simon Sinek",
+      "cues": "gold and black spine",
+      "category": "Books",
+      "section": "Business and strategy",
+      "meta": {
+        "format": "Paperback",
+        "language": "English",
+        "publisher": "Penguin Business"
+      }
+    },
+    {
+      "id": "never-split-the-difference",
+      "name": "Never Split the Difference",
+      "prompt": "book",
+      "price": 65.0,
+      "author": "Chris Voss",
+      "cues": "cream spine, gold title",
+      "category": "Books",
+      "section": "Business and strategy",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "the-almanack-of-naval-ravikant",
+      "name": "The Almanack of Naval Ravikant",
+      "prompt": "book",
+      "price": 69.0,
+      "author": "Eric Jorgenson",
+      "cues": "white spine, spaced capitals",
+      "category": "Books",
+      "section": "Business and strategy",
+      "meta": {
+        "format": "Paperback",
+        "language": "English",
+        "publisher": "Harper Business"
+      }
+    },
+    {
+      "id": "the-psychology-of-money",
+      "name": "The Psychology of Money",
+      "prompt": "book",
+      "price": 59.0,
+      "author": "Morgan Housel",
+      "cues": "white spine, serif title",
+      "category": "Books",
+      "section": "Money",
+      "meta": {
+        "format": "Hardback",
+        "language": "English",
+        "publisher": "Jaico"
+      }
+    },
+    {
+      "id": "the-richest-man-in-babylon",
+      "name": "The Richest Man in Babylon",
+      "prompt": "book",
+      "price": 35.0,
+      "author": "George S. Clason",
+      "cues": "dark blue spine, white title",
+      "category": "Books",
+      "section": "Money",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "think-and-grow-rich",
+      "name": "Think and Grow Rich",
+      "prompt": "book",
+      "price": 39.0,
+      "author": "Napoleon Hill",
+      "cues": "white spine, red title",
+      "category": "Books",
+      "section": "Money",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "attitude-is-everything",
+      "name": "Attitude Is Everything",
+      "prompt": "book",
+      "price": 39.0,
+      "author": "Jeff Keller",
+      "cues": "red spine, yellow title",
+      "category": "Books",
+      "section": "Habits and productivity",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "deep-work",
+      "name": "Deep Work",
+      "prompt": "book",
+      "price": 59.0,
+      "author": "Cal Newport",
+      "cues": "yellow spine, black title",
+      "category": "Books",
+      "section": "Habits and productivity",
+      "meta": {
+        "format": "Paperback",
+        "language": "English",
+        "publisher": "Piatkus"
+      }
+    },
+    {
+      "id": "do-it-today",
+      "name": "Do It Today",
+      "prompt": "book",
+      "price": 49.0,
+      "author": "Darius Foroux",
+      "cues": "mustard spine",
+      "category": "Books",
+      "section": "Habits and productivity",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "how-to-win-friends-influence-people",
+      "name": "How to Win Friends & Influence People",
+      "prompt": "book",
+      "price": 45.0,
+      "author": "Dale Carnegie",
+      "cues": "white spine, red title",
+      "category": "Books",
+      "section": "Habits and productivity",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "make-your-bed",
+      "name": "Make Your Bed",
+      "prompt": "book",
+      "price": 49.0,
+      "author": "William H. McRaven",
+      "cues": "white spine, grey title",
+      "category": "Books",
+      "section": "Habits and productivity",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "the-7-habits-of-highly-effective-people",
+      "name": "The 7 Habits of Highly Effective People",
+      "prompt": "book",
+      "price": 75.0,
+      "author": "Stephen R. Covey",
+      "cues": "white and gold spine, large red 7",
+      "category": "Books",
+      "section": "Habits and productivity",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "think-straight",
+      "name": "Think Straight",
+      "prompt": "book",
+      "price": 49.0,
+      "author": "Darius Foroux",
+      "cues": "orange spine",
+      "category": "Books",
+      "section": "Habits and productivity",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "don-t-believe-everything-you-think",
+      "name": "Don't Believe Everything You Think",
+      "prompt": "book",
+      "price": 49.0,
+      "author": "Joseph Nguyen",
+      "cues": "thin white spine, red title",
+      "category": "Books",
+      "section": "Mind and psychology",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "ikigai",
+      "name": "Ikigai",
+      "prompt": "book",
+      "price": 59.0,
+      "author": "Hector Garcia and Francesc Miralles",
+      "cues": "pale blue spine with blossom, letters stacked",
+      "category": "Books",
+      "section": "Mind and psychology",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "surrounded-by-idiots",
+      "name": "Surrounded by Idiots",
+      "prompt": "book",
+      "price": 65.0,
+      "author": "Thomas Erikson",
+      "cues": "white spine, lower-case title",
+      "category": "Books",
+      "section": "Mind and psychology",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "the-art-of-being-alone",
+      "name": "The Art of Being Alone",
+      "prompt": "book",
+      "price": 39.0,
+      "author": "Renuka Gavrani",
+      "cues": "white spine, thin black title",
+      "category": "Books",
+      "section": "Mind and psychology",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "the-power-of-positive-thinking",
+      "name": "The Power of Positive Thinking",
+      "prompt": "book",
+      "price": 45.0,
+      "author": "Norman Vincent Peale",
+      "cues": "white spine, red tick at the foot",
+      "category": "Books",
+      "section": "Mind and psychology",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "the-power-of-your-subconscious-mind",
+      "name": "The Power of Your Subconscious Mind",
+      "prompt": "book",
+      "price": 39.0,
+      "author": "Joseph Murphy",
+      "cues": "white spine, red title",
+      "category": "Books",
+      "section": "Mind and psychology",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "thinking-fast-and-slow",
+      "name": "Thinking, Fast and Slow",
+      "prompt": "book",
+      "price": 75.0,
+      "author": "Daniel Kahneman",
+      "cues": "orange spine, white title, penguin",
+      "category": "Books",
+      "section": "Mind and psychology",
+      "meta": {
+        "format": "Paperback",
+        "language": "English",
+        "publisher": "Penguin"
+      }
+    },
+    {
+      "id": "great-expectations",
+      "name": "Great Expectations",
+      "prompt": "book",
+      "price": 29.0,
+      "author": "Charles Dickens",
+      "cues": "white spine, bold black title",
+      "category": "Books",
+      "section": "Fiction",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    },
+    {
+      "id": "the-alchemist",
+      "name": "The Alchemist",
+      "prompt": "book",
+      "price": 45.0,
+      "author": "Paulo Coelho",
+      "cues": "orange-red spine, author in script",
+      "category": "Books",
+      "section": "Fiction",
+      "meta": {
+        "format": "Paperback",
+        "language": "English"
+      }
+    }
+  ],
+  "belongings": [
+    "mobile phone"
+  ],
+  "zones": [
+    "shelf",
+    "bookshelf"
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "name": "Supermarket",
+  "currency": "AED",
+  "products": [
+    {
+      "id": "frozen-meal",
+      "name": "Frozen meal",
+      "prompt": "food package",
+      "price": 18.5,
+      "category": "Groceries",
+      "section": "Frozen"
+    },
+    {
+      "id": "paddle",
+      "name": "Table tennis paddle",
+      "prompt": "table tennis paddle",
+      "price": 35.0,
+      "category": "Sports",
+      "section": "Table tennis"
+    },
+    {
+      "id": "bottle",
+      "name": "Bottled drink",
+      "prompt": "bottle",
+      "price": 4.0,
+      "category": "Groceries",
+      "section": "Drinks"
+    },
+    {
+      "id": "can",
+      "name": "Canned drink",
+      "prompt": "drink can",
+      "price": 3.0,
+      "category": "Groceries",
+      "section": "Drinks"
+    }
+  ],
+  "belongings": [
+    "mobile phone"
+  ],
+  "zones": [
+    "shelf",
+    "refrigerator",
+    "display rack"
+  ]
+}

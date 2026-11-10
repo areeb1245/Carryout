@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Walk-out checkout</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23262421'/%3E%3Cpath d='M4 5h8l-1 6H5z' fill='none' stroke='%23fff' stroke-width='1.4'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div>
+        <h1>Walk-out checkout</h1>
+        <p class="lede">SAM 3.1 outlines every shopper, hand and product in the picture. The shopper whose hand takes an item off the shelf gets it on their bill, and pays when they walk out with it.</p>
+      </div>
+      <p class="model" id="model" role="status"><span class="dot" id="model-dot"></span><span id="model-text">Checking the model</span></p>
+    </header>
+
+    <main>
+      <section class="stage" aria-label="Camera">
+        <div class="viewer" id="viewer">
+          <canvas id="view" width="960" height="540"></canvas>
+          <p class="viewer-note" id="viewer-note">Choose a clip, a video file or your camera, then press Start.</p>
+        </div>
+
+        <div class="controls">
+          <div class="field">
+            <label for="shop">Shop</label>
+            <select id="shop" class="narrow"></select>
+          </div>
+          <div class="field">
+            <label for="source">Footage</label>
+            <select id="source"></select>
+          </div>
+          <input type="file" id="file" accept="video/*" hidden />
+          <button class="primary" id="start" type="button">Start</button>
+          <fieldset class="toggles">
+            <legend class="sr">Show on the picture</legend>
+            <label><input type="checkbox" id="show-hands" checked /> Hands</label>
+            <label><input type="checkbox" id="show-stock" checked /> Stock on shelves</label>
+            <label><input type="checkbox" id="show-zone" /> Shelf area</label>
+          </fieldset>
+        </div>
+        <label class="auto"><input type="checkbox" id="auto-checkin" /> Hands-free: give every new face a profile and a Stripe test card without asking</label>
+        <p class="meter" id="meter" aria-live="off">&nbsp;</p>
+
+        <h2>What happened</h2>
+        <ol class="events" id="events">
+          <li class="empty">Nothing yet. Picks, returns and payments are listed here as they happen.</li>
+        </ol>
+
+        <details class="catalog wide" id="catalog">
+          <summary>Catalogue</summary>
+          <p class="hint">Products sit in a category and a section within it. SAM looks for each product's phrase on every frame; products that share a phrase (every book is "book") are told apart by reading the text on them. Changes apply the next time you press Start.</p>
+          <div class="scroll">
+          <table>
+            <thead>
+              <tr><th scope="col">Name</th><th scope="col">Author or maker</th><th scope="col">Category</th><th scope="col">Section</th><th scope="col">What SAM looks for</th><th scope="col" class="num">Price</th><th><span class="sr">Remove</span></th></tr>
+            </thead>
+            <tbody id="products"></tbody>
+          </table>
+          </div>
+          <button type="button" class="quiet" id="add-product">Add a product</button>
+          <div class="field wide">
+            <label for="belongings">Never billed (shoppers' own things, comma separated)</label>
+            <input id="belongings" type="text" autocomplete="off" />
+          </div>
+          <p class="hint" id="prompt-count"></p>
+          <div class="row">
+            <button type="button" id="save-catalog">Save catalogue</button>
+            <span class="hint" id="catalog-note" role="status"></span>
+          </div>
+        </details>
+      </section>
+
+      <aside class="side">
+        <h2>Carts</h2>
+        <p class="hint" id="pay-note"></p>
+        <div id="carts"><p class="empty">No shoppers in view.</p></div>
+
+        <details class="catalog" id="profiles">
+          <summary id="profile-count">Profiles</summary>
+          <p class="hint">A profile is a face, a card and an email address, kept in a SQLite file on this computer. A face that matches one is recognised as soon as it is in view.</p>
+          <ul class="profile-list" id="profile-list"></ul>
+          <button type="button" class="quiet" id="forget" hidden>Delete all profiles</button>
+        </details>
+
+      </aside>
+    </main>
+
+    <dialog id="checkin" aria-labelledby="checkin-title">
+      <form method="dialog">
+        <h2 id="checkin-title">Check in</h2>
+        <p class="hint">Their face as the camera sees it now is saved on this computer, and the card is saved to a new customer in the Stripe sandbox. The card is charged when they walk out, and the invoice goes to the email address.</p>
+        <div class="field wide">
+          <label for="checkin-name">Name</label>
+          <input id="checkin-name" type="text" autocomplete="off" maxlength="40" />
+        </div>
+        <div class="field wide">
+          <label for="checkin-email">Email for the invoice</label>
+          <input id="checkin-email" type="email" autocomplete="off" maxlength="120" />
+        </div>
+        <div class="field wide">
+          <label for="checkin-card">Stripe test card</label>
+          <select id="checkin-card"></select>
+        </div>
+        <div class="row end">
+          <button type="submit" value="cancel">Cancel</button>
+          <button type="submit" value="ok" class="primary">Check in</button>
+        </div>
+      </form>
+    </dialog>
+
+    <video id="video" playsinline muted hidden></video>
+    <script src="/static/app.js" type="module"></script>
+  </body>
+</html>

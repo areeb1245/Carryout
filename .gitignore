@@ -1,0 +1,10 @@
+.venv/
+.env
+.cache/
+scratch/
+out/
+__pycache__/
+*.pyc
+.DS_Store
+data/
+models/*.onnx
