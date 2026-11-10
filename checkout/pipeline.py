@@ -153,6 +153,8 @@ class Session:
         self.zooming = not catalog.members and any(p.billable for p in catalog.products)
         self.zoom_prompts = [*catalog.by_prompt, HELD]
         self.hand_boxes: list[list[float]] = []  # the hands in the latest answer, for where to look closer
+        self.people_boxes: list[list[float]] = []  # and the shoppers, for when no hand was found
+        self.frame_w = 960  # how wide the frames come, in pixels: how close a look their pixels allow
         self.zoomed = 0  # frames that had a closer look
 
     # ------------------------------------------------------------------ frame loop
@@ -183,7 +185,7 @@ class Session:
 
     async def _ask(self, jpeg: bytes, prompts: list[str]) -> tuple[dict, float]:
         t0 = time.perf_counter()
-        areas = zoom.regions(self.hand_boxes) if self.zooming else []
+        areas = zoom.regions(self.hand_boxes, self.frame_w, self.people_boxes) if self.zooming else []
         calls = [self.sam.segment(jpeg, prompts, self.threshold)]
         if areas:
             frame = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
@@ -192,7 +194,8 @@ class Session:
         result = answers[0]
         if isinstance(result, BaseException):
             raise result
-        self.hand_boxes = zoom.hands_in(result)
+        self.hand_boxes, self.people_boxes = zoom.hands_in(result), zoom.people_in(result)
+        self.frame_w = int((result.get("image") or {}).get("w") or self.frame_w)
         closer = [zoom.back(near["detections"], area) for area, near in zip(areas, answers[1:]) if isinstance(near, dict)]
         if closer:  # a copy: the client may keep the frame's own answer in its cache
             result = {**result, "detections": result["detections"] + [d for found in closer for d in found], "zoom": areas}

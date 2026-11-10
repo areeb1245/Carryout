@@ -244,7 +244,8 @@ async function start() {
     if (choice === "camera") {
       S.kind = "camera";
       const id = $("camera").value;
-      S.stream = await navigator.mediaDevices.getUserMedia({ video: { ...(id ? { deviceId: { exact: id } } : {}), width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+      // full HD where the camera has it: items held a few steps back need the pixels (frame_width still caps what is sent)
+      S.stream = await navigator.mediaDevices.getUserMedia({ video: { ...(id ? { deviceId: { exact: id } } : {}), width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
       video.removeAttribute("src");
       video.srcObject = S.stream;
       if (!id) listCameras(); // allowed just now: the cameras have names from here on

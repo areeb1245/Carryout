@@ -423,6 +423,12 @@ are small in the frame, each frame also goes to SAM cut down to them, round wher
 calls go out together (`checkout/zoom.py`): one cut-out round both hands, or one each when the arms are held out
 apart. What it finds joins the frame's own outlines. Not in a bookshop, whose path reads the whole frame.
 
+Range comes from pixels, so the shop floor asks the camera for full HD and the supermarket sends frames 1600 wide
+(`frame_width`, as the bookshop does). A cut-out never has fewer than 300 of the frame's own pixels across, so a
+sharper frame allows a closer look at someone further back. A few steps back SAM often finds no hands at all. Then
+the closer look goes round each shopper shorter than 60 % of the frame's height instead: their arms and body, head
+and feet left out.
+
 ## Files
 
 | Path | What |
@@ -497,7 +503,8 @@ gate has let in is charged, so register at the gate screen first (a rehearsal le
 - **Two items in one hand-full are tested on one picture.** The naming rules and the final check's count were
   worked out on one frame of a tissue pack and a power bank, and with synthetic tests. Products that a phrase cannot
   tell apart and that look alike on camera will still be held for review rather than billed.
-- **The closer look costs a SAM call.** While the hands are small, a frame takes two or three calls instead of one.
+- **The closer look costs a SAM call.** While the hands are small, or a far-off shopper's hands are not found, a
+  frame takes two or three calls instead of one. Full HD frames are also bigger to send from a phone.
   On the supermarket sample, with it on, answers came back about 1.2 s after each frame (median).
 - **The likeness check is tuned on one clip.** 0.55 and the 0.05 lead were set from a handful of pictures; a
   picture taken from the same clip it is then tested on is the easy case. Products that look alike (two flavours
