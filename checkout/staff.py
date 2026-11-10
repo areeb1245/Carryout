@@ -11,7 +11,9 @@ a random salt, and the SHA-256 of salt + token. A token is accepted only if its 
 on file, not revoked and not expired, and the hash of what was sent matches. The token itself is never stored.
 Signing out revokes it.
 
-Wrong codes are throttled per address: `MAX_TRIES` in `TRY_WINDOW_S`.
+Wrong codes are throttled per address: `MAX_TRIES` in `TRY_WINDOW_S`. Behind a proxy the address comes from a header
+the caller can fake, so all wrong codes together are also capped (`MAX_TRIES_ALL`): guessing the code from many
+made-up addresses gets nowhere, at worst sign-in pauses for everyone for a few minutes.
 """
 from __future__ import annotations
 
@@ -29,6 +31,7 @@ import jwt
 ISSUER = "paypal-hackathon"
 LIFETIME_S = 12 * 3600  # one shift
 MAX_TRIES = 5
+MAX_TRIES_ALL = 30  # wrong codes from every address together, in the same window
 TRY_WINDOW_S = 600
 MIN_CODE = 8
 COOKIE = "staff"
@@ -55,6 +58,7 @@ class Staff:
         # without a secret of its own, tokens are signed with a random one: they last until the server restarts
         self._secret = secret or secrets.token_urlsafe(48)
         self.tries: dict[str, list[float]] = {}
+        self.all_tries: list[float] = []
         self.lock = threading.Lock()
         path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, check_same_thread=False)
@@ -71,7 +75,8 @@ class Staff:
         with self.lock:
             recent = [t for t in self.tries.get(address, []) if now - t < TRY_WINDOW_S]
             self.tries[address] = recent
-            return len(recent) >= MAX_TRIES
+            self.all_tries = [t for t in self.all_tries if now - t < TRY_WINDOW_S]
+            return len(recent) >= MAX_TRIES or len(self.all_tries) >= MAX_TRIES_ALL
 
     def sign_in(self, code: str, address: str = "") -> tuple[str, float] | None:
         """The staff code -> (token, expiry time), or None when it is wrong (or sign-in is not set up)."""
@@ -80,6 +85,10 @@ class Staff:
         if not hmac.compare_digest(_digest(code.strip()), self._code):
             with self.lock:
                 self.tries.setdefault(address, []).append(time.time())
+                self.all_tries.append(time.time())
+                if len(self.tries) > 10_000:  # made-up addresses: forget the oldest
+                    for gone in list(self.tries)[:5_000]:
+                        self.tries.pop(gone, None)
             return None
         with self.lock:
             self.tries.pop(address, None)

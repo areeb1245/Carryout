@@ -13,7 +13,7 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from checkout import server
-from checkout.staff import COOKIE, MAX_TRIES, Staff, StaffError
+from checkout.staff import COOKIE, MAX_TRIES, MAX_TRIES_ALL, Staff, StaffError
 
 CODE = "open-sesame-42"
 SECRET = "s" * 40
@@ -60,6 +60,12 @@ def test_wrong_codes_are_throttled(staff):
         assert not staff.throttled("9.9.9.9")
         staff.sign_in("guess", "9.9.9.9")
     assert staff.throttled("9.9.9.9") and not staff.throttled("8.8.8.8")
+
+
+def test_guessing_from_many_made_up_addresses_is_capped(staff):
+    for n in range(MAX_TRIES_ALL):
+        staff.sign_in("guess", f"10.0.{n // 250}.{n % 250}")
+    assert staff.throttled("172.16.0.1")  # a fresh address too
 
 
 def test_a_hosted_copy_will_not_start_without_a_code_and_a_secret(tmp_path):
