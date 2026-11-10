@@ -1,541 +1,496 @@
-# Walk-out checkout on SAM 3.1
+# Walk-out checkout on SAM 3.1 and PayPal
 
-A cashierless-shop demo with two stations, each with its own camera.
+A cashierless shop that runs on ordinary cameras. Shoppers register once at a gate with their face and a PayPal
+payment method, take what they want off the shelf, and walk out. They are charged through PayPal for exactly what
+they carried out, and get a PayPal invoice by email.
 
-1. **The gate.** A shopper stands in front of the gate camera. A face the shop knows, with a payment method on file,
-   is let in. A new face registers on the spot: name, email and a PayPal payment method. Nobody shops unregistered.
-2. **The shop floor.** A second camera watches the shelf. SAM 3.1 outlines every shopper, hand and product, and the
-   shopper whose hand takes an item off the shelf gets it on their bill. Put it back and it comes off.
-3. **The door.** When a shopper walks out, one model call checks their bill line by line against the pictures of them
-   carrying things: took it, put it back, or unclear. Only "took it" is charged, in one PayPal payment. A PayPal
-   invoice is written and emailed.
+- **Gate.** A known face with a payment method on file is let in. A new face registers on the spot: name, email and a
+  PayPal account or card saved in PayPal's vault. Nobody shops unregistered.
+- **Shop floor.** SAM 3.1 outlines every shopper, hand and product in each frame. The shopper whose hand takes an item
+  off the shelf gets it on their bill. Put it back and it comes off.
+- **Door.** When a shopper leaves, a vision model checks the bill line by line against pictures of them carrying
+  things. Only lines it confirms are charged, in one PayPal payment. Anything doubtful is held for staff review.
+- **Back office.** Every bill keeps the pictures and steps behind it, so staff can check it, charge a held line, or
+  refund through PayPal.
 
-Two shops come with it (`shops/`): a supermarket, where each product has its own phrase, and a bookshop (Folio House,
-`shops/bookshop.json`), where every book is just "book" to SAM and the title is read off the book in the shopper's
-hands.
+![Pick it up, walk out, get billed: what the shopper does, what the AI senses, and what PayPal does at each step](docs/diagrams/walkthrough.svg)
 
-Payments run on **PayPal's sandbox**. The earlier Stripe version is kept on the `stripe` branch; both sit behind the
-same two calls in `checkout/payments.py` (save a method, charge it).
+Two shops are included in `shops/`: a supermarket, where each product has its own camera phrase, and a bookshop
+(Folio House), where every book is "book" to SAM and the title is read off the cover in the shopper's hands.
 
-## Run it
+Payments run on the **PayPal sandbox**. A Stripe version is kept on the `stripe` branch. Both sit behind the same calls
+in `checkout/payments.py`.
 
-```bash
-uv run uvicorn checkout.server:app --port 8765
+## Contents
+
+- [Architecture](#architecture)
+- [A visit, end to end](#a-visit-end-to-end)
+- [How a bill is verified](#how-a-bill-is-verified)
+- [PayPal at the core](#paypal-at-the-core)
+- [The AI models and what each one does](#the-ai-models-and-what-each-one-does)
+- [How the vision language model is used](#how-the-vision-language-model-is-used)
+- [Adding products to the catalogue](#adding-products-to-the-catalogue)
+- [Growing the shop](#growing-the-shop)
+- [Deployment: Modal, Render and Neon](#deployment-modal-render-and-neon)
+- [Data: what is stored where](#data-what-is-stored-where)
+- [Run it locally](#run-it-locally)
+- [Configuration](#configuration)
+- [Results](#results)
+- [Tests and rehearsals](#tests-and-rehearsals)
+- [Built to expand](#built-to-expand)
+- [Files](#files)
+
+## Architecture
+
+![System architecture: cameras, the Render web service, Modal GPU models, Neon, PayPal and Resend](docs/diagrams/architecture.svg)
+
+The server is one FastAPI process. Heavy vision runs on Modal's GPUs. Face detection, face embeddings and shelf OCR
+are small enough to run on the server's CPU. The browser does no analysis: it sends camera frames and draws what the
+server sends back.
+
+| Part | Where it runs | What it does |
+|---|---|---|
+| Web server (`checkout/server.py`) | Render | Screens, the gate API, the floor's WebSocket, staff sign-in |
+| Visit pipeline (`checkout/pipeline.py`, `engine.py`) | Render | Frames in order, picks and returns from masks, side jobs for faces, reading and checks |
+| SAM 3.1 and DINOv2 (`modal_app/sam_checkout.py`) | Modal, L40S | Outlines people, hands and products. Turns pictures into vectors |
+| DeepSeek vision model | Modal | Names picked items, reads book titles, makes the check before charging |
+| YuNet + SFace, RapidOCR | Render CPU | Faces at the gate and on the floor. Text on shelves and covers |
+| Face index | Neon Postgres + pgvector | "Whose face is this?" in one query, however many shoppers registered |
+| Ledger, profiles, catalogues | SQLite and files on Render's disk | Bills, steps, proof pictures, refunds, products |
+| Payments | PayPal sandbox | Saved methods, the charge, the invoice, refunds |
+| Email | Resend | The invoice email |
+
+## A visit, end to end
+
+![A visit end to end: entry at the gate, in store on the floor camera, checkout at the door](docs/diagrams/visit.svg)
+
+## How a bill is verified
+
+Nothing is charged on one signal. A line has to pass every stage below, and anything that fails one is held for review
+rather than charged. Staff see the pictures and can charge it by hand or mark it not taken.
+
+![The six stages a line passes before it is charged, and what is held for review](docs/diagrams/verification.svg)
+
+### 1. The gate: who is shopping
+
+- Faces are found with OpenCV's YuNet and turned into a 128-number embedding with SFace, on the server, in about
+  15 ms. Each profile keeps up to six embeddings from different angles.
+- The gate asks the Neon pgvector index for the nearest face (HNSW, cosine distance). A match needs a score of 0.45
+  and a lead of 0.1 over the next profile. A face that only resembles someone registers as a new person.
+- The same answer has to come twice in a row before the gate acts.
+- **No payment method, no profile.** A profile is saved only once PayPal has returned a vault token. A PayPal account
+  is approved by the shopper in a PayPal window. A sandbox card is saved the same way.
+- The visit opens with the gate picture and the match score, which go on the bill as proof.
+
+### 2. The floor: who took what
+
+Each analysed frame goes to SAM with `person`, `hand`, `item held in hand` and every catalogue phrase. The engine
+(`checkout/engine.py`) gives each hand to the shopper whose mask it lies in, and tracks each item as candidate, at
+rest or held.
+
+| Decision | Evidence |
+|---|---|
+| Pick | A resting item leaves its place while a hand is on it, or an item first seen in a hand stays there |
+| Inferred pick | A steady shelf item is gone, its spot is in view, and a hand had just closed over it |
+| Return | The item sits still with no hand on it, on a shelf or away from the shopper |
+| Inferred return | Last seen being put on a shelf, and the shopper's hands have been empty since |
+| Hand-over | Only another shopper's hands touch it for over a second |
+| Same item again | An item hidden for a moment that reappears in the same hand is not counted twice |
+
+A pick goes to the shopper with the largest share of hand contact over time, not whoever is nearest in one frame.
+Thresholds are fractions of the frame diagonal and seconds, so they do not depend on resolution or frame rate.
+
+- **Faces on the floor** are compared only with shoppers the gate let in, and need two matching looks (or one at 0.45)
+  before anything goes on their bill. An unknown face is shown as **Not registered** and is never charged.
+- **Same shopper, new outline.** If a shopper is lost and reappears with the same face, the two are merged: one
+  shopper, one bag, nothing billed twice.
+- **A moving camera.** For hand-held footage the engine follows background points and moves every remembered position
+  with the camera. Inferred picks are switched off while the camera moves.
+- **Far shoppers.** While hands are small in the frame, a second SAM call goes out on a cut-out round them, 2 to 3
+  times larger (`checkout/zoom.py`). A tissue pack at arm's length went from not found to 0.45 to 0.59.
+
+### 3. Naming the product
+
+SAM's phrase is the first guess, and phrases spill onto neighbouring items ("wireless power bank" outlined a tissue
+pack at 0.36). So:
+
+- A faint outline next to the phrase's own strong one counts for less.
+- **Second looks.** The vision model is shown each pick on up to three frames with a box round it, plus the first
+  catalogue picture of each candidate. It answers whether the item is held and which product it is.
+- **Likeness.** The item is cut out and compared with the catalogue's pictures by DINOv2 vectors. At 0.55 or more, and
+  0.05 ahead of the next product, it adds one vote. It never renames an item alone, and never counts as "held".
+- The looks can overrule the phrase only with one more signal agreeing. A name the looks dispute is held for review.
+- **Books** are all "book" to SAM. The title is read by the vision model in the shopper's hands: two readings put it
+  on the bill, three missing readings in a row take it off, and there is one line per title per shopper. A title read
+  only on the shelf by OCR never bills anyone.
+
+### 4. The door: still with them?
+
+A shopper has left when their whole outline has been out of view for `leave_after_s` seconds (set per shop). Leaving
+with empty hands does not close the visit. For products without a title:
+
+- the line stays only if the floor saw the item with them in their last 6 seconds in view, or the vision model sees it
+  on them in their last six pictures;
+- otherwise it is held for review, which is what an item put down out of the camera's view looks like;
+- two or more door pictures with both hands empty mark a recent item as put back.
+
+### 5. The check before charging
+
+One call to the vision model with the bill and up to five pictures: the picture each item was read in, the latest
+close view of the hands, and the whole scene when the shopper was last seen. For each line it reports the picture
+where the item is held and any later picture where it is at rest again.
+
+| Verdict | Meaning | Charged |
+|---|---|---|
+| **Kept** | Held in a picture, not seen put down afterwards | Yes |
+| **Put back** | Seen at rest again in a later picture | No |
+| **Unclear** | No picture shows it held | Only a book whose title was already read twice in their hands, and not found gone at the door |
+
+No answer from the model, or no picture kept, means no charge. The model also reports how many of each product it sees
+at once, so one power bank in hand never pays for two.
+
+### 6. Payment and proof
+
+- The kept lines are charged in one PayPal **Orders v2** payment against the saved vault token, shopper not present,
+  with a `PayPal-Request-Id` so a retry can never charge twice.
+- A PayPal **invoice** is written with the lines and marked as paid. Resend emails it to the shopper.
+- The **ledger** keeps every step with its time, the gate picture, the floor face picture, the frame where each item
+  left the shelf, and the pictures the final check was shown.
+- **Refunds** of one line or the whole bill go through PayPal's capture refund API. The ledger makes sure nothing is
+  refunded twice.
+- Two runs watching the same shopper charge once: the first run to settle the visit takes it.
+
+## PayPal at the core
+
+The AI decides what a shopper carried out. PayPal is what turns that into a purchase: no till, no card tap, no scan.
+Every money step goes through PayPal's REST APIs in the sandbox (`checkout/payments.py`).
+
+| When | PayPal API | What it does |
+|---|---|---|
+| Registration | `POST /v3/vault/setup-tokens` | Starts saving a PayPal account or a card. A PayPal account is approved by the shopper in a PayPal window |
+| Registration | `POST /v3/vault/payment-tokens` | Turns the approved setup token into a saved payment token, `usage_type: MERCHANT` |
+| Gate | (saved token) | The method on file is shown when the face is recognised. No method, no entry |
+| Walk out | `POST /v2/checkout/orders` | One order with `intent: CAPTURE`, paid from the vault token with the shopper not present. Each line is listed as an item |
+| Walk out | `POST /v2/invoicing/invoices` | The invoice for the same lines, then `/send` and `/payments` to mark it paid |
+| Dashboard | `POST /v2/payments/captures/{id}/refund` | Gives back one line or the whole bill |
+
+- **Never twice.** Every call carries a `PayPal-Request-Id`. The charge's is made from the session, shopper and visit,
+  and a refund's from the visit and line, so a retry is the same request to PayPal, not a second charge.
+- **One charge per visit.** However many items, the shopper sees one payment and one invoice.
+- **Stored credential rules.** A saved card is charged as `payment_initiator: MERCHANT`, `payment_type: UNSCHEDULED`,
+  `usage: SUBSEQUENT`, which is what an unattended checkout is.
+- **Sandbox only.** The host is fixed to `api-m.sandbox.paypal.com`, and `PAYPAL_ENV` must say `sandbox`.
+
+## The AI models and what each one does
+
+| Model | Where | Used for |
+|---|---|---|
+| **SAM 3.1** (Meta) | Modal, L40S | Outlines people, hands and products from text phrases, every frame. Also outlines "more like this box" (visual prompt) on the catalogue screen |
+| **DINOv2 ViT-S/14** (Meta) | Modal, same container | Picture vectors for the likeness check and for picking the most different product views |
+| **DeepSeek V4.1 Flash** (vision) | Modal, chat completions endpoint | Second looks at picks, titles in the hands, the door look, the check before charging, describing new products |
+| **YuNet + SFace** (OpenCV, ONNX) | Server CPU | Face detection and 128-number face embeddings |
+| **RapidOCR** | Server CPU | Reading book spines on the shelf, about 100 ms each |
+
+Two kinds of model check each other. SAM decides *that* something was taken, from geometry. The vision model decides
+*what* it was and *whether it is still with the shopper*, from looking. A charge needs both to agree.
+
+## How the vision language model is used
+
+The vision language model (DeepSeek V4.1 Flash on Modal, `checkout/verify.py`) never watches the video. It is asked
+short, specific questions about a few pictures, each with a yellow box drawn round what it should look at, and must
+answer in JSON at temperature 0. It runs beside the frame loop, so the floor never waits for it.
+
+| Question | When | Shown | Answers |
+|---|---|---|---|
+| **Second look** | Each pick, on up to three frames | The frame with the item boxed, catalogue pictures, any text OCR read | Is it held, and which product |
+| **Titles in the hands** | About once a second while a shopper carries books | The frame with the shopper boxed | Which titles they hold, and how many they cannot read |
+| **Still carrying?** | At the door | The shopper's last six pictures, catalogue pictures | Which products are still on them, how many hands are visible |
+| **Shelf reading** | When OCR cannot name a spine | The spine boxed | Which catalogue title it is |
+| **Check before charging** | Once per walk-out | The bill and up to five lettered pictures | Per line: kept, put back or unclear, with the picture it saw |
+| **Describe a product** | On the catalogue screen | The object boxed | Name, maker, category, section, look, and phrases to try |
+
+The answers are only ever votes. A line is charged when the masks, the looks and the final check agree, and a missing
+or malformed answer counts as "not confirmed", never as "yes".
+
+## Adding products to the catalogue
+
+The **Catalogue** screen (`/catalogue`) is where products are added, without editing files.
+
+![Adding a product from the camera in six steps](docs/diagrams/catalogue.svg)
+
+**Hold to camera.** Hold the product up and turn it slowly. The form comes back filled in with the name, maker,
+category and section, what it looks like, the phrase that outlined it best, and four pictures. Only the price is left
+to type.
+
+**From a clip.** Import a video or pick a sample. It is cut into up to 120 frames, and SAM outlines what it finds on
+each. Click an outline, or drag a box round something it missed, then:
+
+- *Describe it*: the vision model names the object as sold, with its packaging (two rolls wrapped together are a pack
+  of two), and suggests phrases.
+- *Test the phrases*: each phrase is run on that frame and two either side. A phrase counts when its outline covers
+  the picked object (overlap 0.6 or more). On the freezer sample, only "packaged food" out of four phrases outlined
+  the pack in hand.
+- *Find more like it*: SAM's visual prompt with the picked box as the example.
+- *Add as a new product*, or add the picture to an existing one.
+
+Each product row has up to four pictures, name, maker, category, section, camera phrase and price. The same screen
+lists the shopper's own things that are never billed (phones, wallets) and the seconds out of view that count as
+leaving. Changes apply on the next Start.
+
+A product in `shops/<shop>.json` looks like this:
+
+```json
+{
+  "id": "pmwawnx7s",
+  "name": "Wireless Earbuds Charging Case",
+  "prompt": "charging case",
+  "price": 299.0,
+  "cues": "small white rounded rectangular case, grey label, glossy plastic",
+  "category": "Electronics",
+  "section": "Mobile Accessories",
+  "examples": ["ex-7c05d01ea4dd4be4.jpg", "ex-71cba51dd5964153.jpg"]
+}
 ```
 
-| Screen | Address | For |
+## Growing the shop
+
+The shop is meant to start small and grow: a short list of products that are told apart reliably, then more, checked
+on the floor as they are added.
+
+- **More products.** Every phrase is part of the same SAM request. Phrases are batched on the GPU (eight phrases in
+  139 ms on an L40S). Beyond `SAM_MAX_PROMPTS` phrases (16 on this app's endpoint) the client splits them into
+  parallel requests.
+- **Products that look alike to SAM** share one phrase and are told apart another way, as the bookshop does with
+  27 titles under "book": by reading text, by the vision model, and by likeness to the catalogue pictures.
+- **More shoppers.** The gate's face lookup is one pgvector nearest-neighbour query on Neon, so it stays one query
+  however many people register. The floor only compares faces with shoppers currently inside.
+- **More shops.** Each shop is one JSON file and a folder of pictures. The floor picks the shop at Start.
+- **More GPU.** The Modal app runs one container (`max_containers=1`), which keeps up with about seven frames a second.
+  Raising that number adds capacity for more cameras, at the cost of more GPU time.
+- **Next steps for a real store:** a camera at the door instead of "out of this camera's view", several floor cameras
+  per shop, and more than one server instance (gate tickets and live visits are in process memory today).
+
+## Deployment: Modal, Render and Neon
+
+![Where it runs: Render, Modal, Neon, PayPal and Resend](docs/diagrams/deployment.svg)
+
+### Modal: SAM 3.1 on a GPU
+
+![Inside the GPU: one frame through the SAM 3.1 backbone, text encoder, batched detector and outlines, plus DINOv2 picture vectors](docs/diagrams/gpu.svg)
+
+`modal_app/sam_checkout.py` is this app's own SAM 3.1 deployment. It runs every phrase of a frame through the
+detector as one batch, reusing the image backbone, and caches phrase embeddings because a shop asks for the same
+phrases on every frame. The same container also runs DINOv2 for picture vectors. One frame with eight phrases:
+
+| GPU | One phrase at a time | Batched |
 |---|---|---|
-| The gate | http://localhost:8765/gate (also http://gate.localhost:8765) | shoppers: be recognised or register, then walk in |
-| The shop floor | http://localhost:8765 | the shop: the camera, each shopper's bag, what happened at the door |
-| The catalogue | http://localhost:8765/catalogue | the shop: the products, their pictures, and adding new ones from a camera or a clip |
-| The dashboard | http://localhost:8765/dashboard | the shop: sales, every transaction with the proof behind its bill, the customers, refunds |
-
-On the shop floor pick a shop, then the footage (a camera plugged into this computer, a sample clip or a video
-file), and press Start. **Rehearsal** runs everything except the charge, the invoice and the email. The camera model
-runs on a GPU that switches off after five idle minutes, and switching it on takes up to a minute. The page asks for
-it as it opens and keeps it awake while the page is in use (until 20 minutes after the last click or run), so Start
-is immediate during a demo; the GPU bills for that time.
-
-On the picture, whatever a shopper holds carries a small label with its name, in the shopper's colour, with a tick
-once it is sure enough to be billed. Titles on their bag whose outline is hidden (the lower books of a stack) are
-listed under the same hands. A live camera also shows the date and time of the frame, and the activity list shows
-the time of day; the list can be narrowed to one shopper. Choosing "Live camera" lists
-every camera this computer can see (the browser asks for permission first), and the gate has its own list, so the two
-stations can be tied to different cameras. Products are added on
-the **Catalogue** screen (below).
-
-The three staff screens (floor, catalogue, dashboard) share one header: the shop's name, the three screens, "Open
-gate" and a gear for **Settings** (what the floor's picture shows, which services are on, and deleting every
-shopper). Registered shoppers are listed on the dashboard under Customers. The gate is the shoppers' screen and keeps
-its own, larger layout.
-
-**From a phone.** A phone's browser only hands over its camera on an https page, so open the app over https: the
-Render address (below), or a tunnel to this computer (`ngrok http 8765`). The pages then use a secure socket
-(`wss`). The gate is public; the staff screens need the staff code (next section). A free ngrok plan has a monthly
-allowance that the gate's one picture a second and the floor's answers use up within hours.
-
-### Staff sign-in
-
-The gate (`/gate`, where shoppers register and check in, on their own phone if they like) is public. Everything
-else is private: the floor, the catalogue, the dashboard, every call behind them and the floor's socket. The guard
-in `checkout/server.py` is deny-by-default with a short public list (the gate and its calls, the PayPal return page,
-`/signin`, `/healthz`, the static files), and a test walks every route to keep it that way.
-
-Staff type the **staff code** (`STAFF_CODE`) once at `/signin`. The server answers with a signed token (JWT, HS256,
-signed with `JWT_SECRET`, good for 12 hours), set as an HttpOnly cookie and also returned in the reply, so scripts can
-send it as `Authorization: Bearer …`. Each token is written down by its id with a random salt and the SHA-256 of
-salt + token (`staff_tokens` in the database; the token itself is never stored), and is accepted only while its
-signature and expiry hold and it is on file, not revoked, with a matching hash. **Sign out** (in Settings) revokes it.
-Five wrong codes from one address in ten minutes are turned away. `tools/live_client.py` signs in with
-`--staff-code` (or `$STAFF_CODE`).
-
-On this computer, with no `STAFF_CODE` in `.env`, nobody can sign in and the staff screens are open to this computer
-only: anything through a tunnel or proxy is refused. A hosted copy does not start without both values.
-
-### Deploying on Render
-
-The repository is a Render Blueprint (`render.yaml`): one Python web service, `uv sync` from the lockfile, Python
-3.11 (`.python-version`), a 1 GB persistent disk at `/var/data`, health checks on `/healthz` (which, unlike
-`/api/health`, never wakes the GPU).
-
-1. In Render, **New → Blueprint**, and pick this repository.
-2. Fill in the values it asks for: `STAFF_CODE` (choose one, at least 8 characters) and the keys from your `.env`
-   (`SAM_URL`, `SAM_API_KEY`, `LLM_*`, `PAYPAL_CLIENT_*`, `RESEND_*`, `DATABASE_URL`). `JWT_SECRET` is generated.
-   `PAYPAL_ENV` is fixed to `sandbox`.
-3. Deploy. Shoppers use `https://<service>.onrender.com/gate`; staff go to the same address and sign in.
-4. In the PayPal developer dashboard nothing changes: the return address is taken from each request.
-
-What to know:
-
-- **Its own data.** The database, catalogues and clips live on the disk (`DATA_DIR`). On the first start the
-  catalogues and their pictures are copied there from `shops/`; after that the disk's copy is the one the catalogue
-  screen edits, and changes to `shops/` in the repository do not reach it. Shoppers register again on Render.
-- **Its own face table.** `FACE_TABLE=checkout_faces_render`: the copy on this computer and the one on Render each
-  keep the face table matching their own database, and "Delete all shoppers" empties it, so they must not share one.
-- **One instance.** Gate tickets, live visits and the sign-in throttle live in the process's memory.
-- **Plan.** A disk needs a paid plan. Under a 512 MB cap in Linux, seven sample visits in a row (supermarket and
-  book clips) levelled off at about 375 MB: 160 MB idle, the reading model for titles about 100 MB once a bookshop is
-  used. Starter (512 MB) fits; Standard if it ever restarts for memory.
-- **Memory over a long day.** A finished visit keeps only the pictures its bag was checked against. A settled
-  shopper's frames are dropped. Whole frames are kept as JPEG, and tracks that are gone for good are forgotten.
-  `MALLOC_ARENA_MAX=2` stops each thread from keeping its own memory pool.
-- **Headless OpenCV only.** The OCR package asks for the desktop OpenCV, which needs graphics libraries a server does
-  not have and shares the `cv2` folder with the headless one; `pyproject.toml` overrides it away.
-- **The face models** (`models/*.onnx`, 37 MB) are in the repository, so the build needs nothing else.
-
-Keys live in `.env`, which git ignores (`.env.example` lists them):
-
-| Variable | For |
-|---|---|
-| `SAM_URL`, `SAM_API_KEY` | the SAM 3.1 endpoint: the `sam3-supermarket` Modal app (below) |
-| `SAM_MAX_PROMPTS`, `SAM_MAX_FPS` | what that endpoint takes: phrases a request, frames a second |
-| `SAM_SHARED_URL`, `SAM_SHARED_API_KEY` | the older shared `deck-twin-sam31` app. Copy them over `SAM_URL` and `SAM_API_KEY`, with 8 and 3, to fall back to it |
-| `LLM_URL`, `LLM_MODAL_KEY`, `LLM_MODAL_SECRET` | the DeepSeek vision model on Modal: reads titles in the hands, and makes the check before charging |
-| `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_ENV` | PayPal. `PAYPAL_ENV` must be `sandbox`; anything else and payments stay off. The code only ever calls `api-m.sandbox.paypal.com` |
-| `DATABASE_URL` | Postgres with pgvector (Neon): the face embeddings the gate searches. Without it faces are matched on this machine |
-| `RESEND_API_KEY`, `RESEND_FROM` | invoice emails |
-| `DEMO_EMAIL` | prefilled in the gate's registration form on this computer (never on the public gate) |
-| `STAFF_CODE`, `JWT_SECRET` | staff sign-in (above) |
-| `DATA_DIR`, `FACE_TABLE` | where the data lives, and this copy's own table of faces (above) |
-
-PayPal, the database and email are each optional: without one, that part switches off and the screens say which.
-
-## The gate
-
-`checkout/gate.py`, `web/gate.html`. The gate camera sends a frame about once a second.
-
-- **Known face, method on file:** "Welcome back", the method on file is shown, and a visit opens (a row in
-  `admissions`, with the gate camera's picture and the match score, which later go on the transaction as proof).
-  The same answer has to come twice running before the gate acts on it. The match percentage shows beside the name.
-- **New face:** the form asks for a name, an email address and how to pay:
-  - *PayPal account*: a vault setup token with `usage_type: MERCHANT`; the shopper approves it in a PayPal window,
-    PayPal sends them back to `/gate/return`, and the approval is exchanged for a payment token.
-  - *Card*: a sandbox test card saved the same way (setup token, then payment token). This needs a sandbox app
-    whose business account can take cards (a US one does); otherwise PayPal answers
-    `NOT_ENABLED_TO_VAULT_PAYMENT_SOURCE` and the gate says so.
-  Nothing is saved until the payment method is: no method, no profile, no way in.
-- **Known face without a usable method** (for example a profile from the Stripe version): asked to add one.
-- **No camera:** "Use a photo" does the same with a picture, which is also how to try the gate on a laptop.
-
-The sign at the top of the gate reads "Gate closed" until the gate has let in the person in front of it, then
-"Gate open for" their name. It closes again as soon as they walk on or a different face steps up.
-
-The real-world version of the form is "tap a card or scan a code"; no hardware is wired up here.
-
-### Faces
-
-Faces are found with OpenCV's YuNet and turned into a 128-number embedding with SFace, both on this machine in about
-15 ms. Each profile keeps up to six embeddings from different angles and one small face picture.
-
-With `DATABASE_URL` set the embeddings are also stored in Postgres with pgvector (`checkout/vectors.py`, table
-`checkout_faces`, HNSW index on cosine distance), and the gate asks that index whose face it sees: one
-nearest-neighbour query however many people have registered, about 110 ms to Neon in Frankfurt. Only embeddings and
-profile ids go there. Pictures, names, emails and payment links stay in `data/checkout.db`. The shop floor matches
-against the copy in memory, so it never waits on the network.
-
-**Who counts as the same person.** SFace gives the same person about 0.6 and up when they face the camera, and two
-different people usually under 0.2; two people who look alike have been seen to reach 0.35. So:
-
-- at the gate, where a face is compared with everyone who ever registered, it takes 0.45 (`SURE`) and a lead of 0.1
-  over the next profile. A face that only resembles someone is treated as a new face, and registers as itself;
-- on the floor, a face is only compared with the people the gate has let in (and this run's own shoppers), and
-  needs two looks naming the same person, or one look at 0.45, before anything goes on their bill;
-- a profile only learns a new angle from a look it is sure of.
-
-Nobody is turned away for an unclear picture; what the cameras saw is kept instead (below), so a wrong match can be
-seen and refunded.
-
-**The same shopper under a new outline.** If a shopper's outline is lost (they turn, are hidden, or step out for
-longer than the cutoff) and a new outline turns up with their face, it is folded into the first: one shopper, one
-bag. Something the new outline was first seen already holding joins the line they had for it, paid or not, so
-nothing carried through the gap is billed twice.
-
-## What happens to a shopper on the floor
-
-1. **Walks in.** The person mask becomes a tracked shopper with a stable id and colour.
-2. **Face.** Their face is matched to the profiles. Someone with an open visit shows by name, with their payment
-   method. Anyone else, an unknown face or a profile that did not come through the gate this time, is flagged
-   **Not registered**, and nothing is ever charged to them.
-3. **Picks and returns.** Decided from the masks (below). Each pick is also shown to the DeepSeek model on up to
-   three frames; together those looks name the product, or dispute the pick.
-4. **Walks out.** A shopper whose outline has been out of the camera's view for three seconds has walked out (so
-   has everyone still inside when a clip ends or Stop is pressed). It is the whole person that counts, not the
-   face or what is in their hands. The number of seconds is set per shop on the **Catalogue** screen
-   (`leave_after_s` in the catalogue). Walking out with something closes the bag and the visit. Leaving the
-   picture with empty hands does neither: that shopper is still known when they come back.
-5. **The check before charging.** One call to the DeepSeek model with the bill and up to five pictures: for each
-   line the picture in which that item was read in their hands, then the latest close view of their hands, then the
-   whole scene the last time they were seen. For every line the model reports the picture it sees the item held in
-   and, if any, a later picture in which it sees the item at rest again. From that:
-   - **kept**: held in a picture, not seen put down afterwards. Charged.
-   - **put back**: seen at rest again in a later picture. Not charged.
-   - **unclear**: no picture shows it in their hands. Charged only if its title was already read in their hands on
-     the floor (two readings) before they left, not first named from the door pictures, and the door look did not
-     find it gone: the usual case is a book carried under another
-     in a stack, or one of several books with no picture of its own. Otherwise not charged.
-   No answer from the model, or no picture kept, means not charged. The bag shows each verdict with its reason
-   and the pictures the check was shown.
-6. **Still linked to the shopper?** Before that check, every product without a title (books have their own door
-   reading, below) must still be linked to the shopper as they leave. Either the floor saw it with them in their
-   last 6 seconds in view (`LINK_S`), or the vision model, shown their last six pictures, sees it on them; it is told
-   products apart by their look and the catalogue pictures. Neither means the item dropped out of sight well before
-   they left and is not with them now, which is what an item put down out of the camera's view looks like. The line
-   is held for review instead of charged. Something in their hands the model cannot match to the catalogue gives the
-   most recently seen item the benefit of the doubt. And an item seen lately still comes off the bill, as put back,
-   when two or more door pictures show both hands with nothing in them but things the model can name.
-6. **Charge.** The kept lines, in one Orders v2 payment against the saved method (`vault_id`), shopper not present,
-   with a `PayPal-Request-Id` so a retry cannot charge twice.
-7. **Invoice.** A PayPal invoice (Invoicing API) with the lines and their category and section, marked as paid. The
-   email through Resend says thank you, lists the items and the total, links the PayPal invoice and ends with
-   "looking forward to meeting you again". PayPal itself emails nobody.
-8. **Visit closed.** The next visit starts at the gate again.
-9. **Written down.** The walk-out goes into the ledger with its lines, its steps, its pictures and its numbers.
-
-Two runs of the floor watching the same shopper (the page and a replay, say) charge once: the run that charges
-takes the visit first, and the other finds it settled. A registered shopper the floor checks in without the gate
-gets a new visit only if their last one was not settled too recently: within 15 minutes for footage, as a replay of
-a clip is the same walk-out again. A live camera films the present, so there a visit settled before the run started
-is over and they are back for more; only one settled while the run was already watching, or in the last 90 seconds
-(the page reloaded straight after the charge, items still in hand), is the same walk-out.
-
-## The catalogue screen
-
-`web/catalogue.html`, `checkout/clips.py`. Two views.
-
-**Products.** One row per product, grouped by category and section: up to four pictures, name, maker, category,
-section, the camera phrase, the price. A picture can be added from a file with "+"; clicking one removes it. Below
-the list: the shoppers' own things that are never billed, and the seconds out of view that count as walking out.
-Changes apply on the next Start.
-
-**From footage.** For working out what a product is called, and which phrase SAM finds it by.
-
-- **Hold to camera.** Hold the product up to the camera and turn it slowly. About every 0.7 s a frame goes to SAM,
-  which outlines the item in hand (green once it is sure). After ten clear views, 30 seconds, or Done, the server
-  keeps the four views that look most different from each other (picture vectors, below) as the product's
-  pictures, asks the vision model what the item is, and tries its phrases on the kept views. The form comes back
-  filled in: name, maker, category and section (the shop's own where one fits), what it looks like, the phrase that
-  outlined the item best, and the pictures. Only the price is left to type. A picture can be left out by clicking it.
-- **A clip.** Import a video (or pick a sample). It is cut into up to 120 frames. Scroll through them; SAM outlines
-  what it finds on each (generic phrases, the shop's own, and any typed under "Also look for"). Click an outline,
-  or drag a box round something the outlines missed (SAM then outlines the object in that box). Then:
-  - *Describe it*: the vision model names the whole object as sold, with its packaging (two tissue rolls wrapped
-    together are a pack of two), and suggests three or four phrases.
-  - *Test the phrases*: each phrase is asked on that frame and two either side. A phrase counts when its outline
-    covers the picked object (overlap of 0.6 or more with its box). The table shows which phrases do, their score,
-    on how many frames, and how many other things each also outlines. On the freezer sample, of "frozen food pack",
-    "frozen meal", "packaged food" and "food package", only "packaged food" outlined the pack in hand.
-  - *Find more like it*: SAM's visual prompt, with the picked box as the example, on that frame.
-  - *Add as a new product*, or add the picture to an existing one.
-
-A camera capture is kept as a clip too, so it can be gone through frame by frame afterwards. Clips and the answers
-SAM gave for them are kept in `data/clips/` and `data/clip-cache/`, on this computer only. Pictures are kept in
-`shops/<shop>/examples/` and listed under each product's `examples` in the shop's file.
-
-### What the pictures are for
-
-SAM 3's visual prompts are boxes drawn *in the image being segmented*: it cannot be handed a photo from elsewhere.
-Pasting a product photo beside a frame and boxing it there was tried and found nothing reliable (scores around 0.33,
-on the wrong things), so the floor still finds products by phrase. The pictures are used in three other ways:
-
-- **Likeness check** (`checkout/likeness.py`). Every picture is turned into a vector once (DINOv2 on the SAM
-  endpoint, `/v1/embed`), and so is every item a shopper picks up, cut out by its box. The cosine says how alike
-  they look. At 0.55 or more, and 0.05 ahead of the next product, it helps name the item: once per line, and only
-  when the second model's look at the same moment sees the item held. It is never counted as the item being held,
-  so it cannot outvote "still on the shelf": a pick that never left the shelf looks just like its product. On the
-  freezer sample the pack in hand scored 0.71 against its picture and was named by it. A pick that resembles no
-  picture gets no vote. The floor draws a box round each item in hand with the likeness after its name.
-- **Reference pictures for the second model.** When it is asked what a picked item is, it is also shown the first
-  picture of each candidate product.
-- **The catalogue** shows them, so whoever keeps it can see what each phrase is meant to find.
-
-## The dashboard and the ledger
-
-`checkout/ledger.py`, `web/dashboard.html`. For the shop, not for shoppers.
-
-- **Overview:** sales, transactions, items sold, average basket and registered shoppers; sales by day for two
-  weeks; the products that sell most; the latest transactions.
-- **Transactions:** every walk-out that had something on the bag. Opening one shows:
-  - *How this bill was made*: the steps in order with the time of day. The gate opening the visit; on the floor,
-    being recognised (with the face match), each item taken, each title read in the hands, anything put back; at
-    the door, what counted as walking out, the verdict of the check before charging on every line, the charge, the
-    invoice, the email, and any refund.
-  - *The pictures behind it*: the gate camera when it let them in, the floor camera when it recognised them, the
-    frame in which each item left the shelf (item outlined), and the pictures the check before charging was shown.
-  - *The bill*: each line with the evidence it was charged on, or why it was held back.
-  - *Under the hood*: frames analysed and the model's time per frame, seconds in view, the face match, how often
-    the second model read their hands, the walk-out rule that applied, seconds from walking out to the payment,
-    the PayPal capture and order.
-- **Charging a held-back line:** when a shopper left with something that was kept off the bill (never identified,
-  or not confirmed), the line carries a list of the catalogue and "Charge it". Whoever has looked at the pictures
-  says which item it was; it is charged to the shopper's saved method as a transaction of its own, with its own
-  invoice and email, and the walk-out links to it. A line can be charged this way once. Not for rehearsals.
-- **Refunds:** on a paid transaction, "Refund" on a line gives its price back and "Refund the whole bill" what is
-  left, through PayPal (`POST /v2/payments/captures/{id}/refund`, with a `PayPal-Request-Id`). The ledger decides how
-  much can still go back, so a line is never refunded twice. A refunded line no longer counts as an item sold.
-- **Customers:** each registered shopper with how they pay, what they buy most, what they have spent and when
-  they last bought. Their name opens their transactions.
-- **Rehearsals** are kept with the same steps and pictures, so a bill can be checked before a real run. They are
-  hidden until "Show rehearsals" is ticked and never count as sales.
-
-Sales are counted in the default shop's currency; sales in another currency (the Stripe version charged in AED)
-are listed but not added in, and cannot be refunded from here.
-
-Lines that are doubtful are never charged: not in the catalogue, a book whose title could not be read, under 50 %
-confidence with no confirmation, disputed by the second model, or not confirmed by the check before charging. They
-stay on the bag marked as not charged, with the reason, and the transaction shows as **Needs review** on the
-dashboard until someone looks at the pictures and either charges the line (**Charge**) or marks it **Not taken**.
-`tools/tidy_ledger_copy.py` rewrites the wording stored in an older `data/checkout.db` in the dashboard's current
-terms.
-
-## The SAM endpoint
-
-`modal_app/sam_checkout.py` is this app's own SAM 3.1 deployment. It runs every phrase of a frame through the detector
-as one batch instead of one after another, and caches the phrase embeddings. Measured on one frame with eight phrases:
-
-| | one phrase at a time | batched |
-|---|---|---|
-| A10G (what the shared app uses) | 575 ms | 367 ms |
-| L40S (what this app is deployed on) | 290 ms | 139 ms |
+| A10G | 575 ms | 367 ms |
+| L40S (deployed) | 290 ms | 139 ms |
 
 ```bash
 modal deploy modal_app/sam_checkout.py              # https://<workspace>--sam3-supermarket.<region>.modal.run
 BENCH_GPU=L40S modal run modal_app/sam_checkout.py  # the timing above, on a GPU of your choice
 ```
 
-Besides phrases, `/v1/segment` takes `exemplars`: boxes round examples in the same picture, SAM 3's visual prompt
-(one more detector pass each, about 20 ms). `/v1/embed` turns pictures into DINOv2 vectors for the likeness check. A
-request with neither is answered exactly as before: on the same frame and phrases, the new deployment and the old
-gave identical detections and scores.
+| Endpoint | Body | Answer |
+|---|---|---|
+| `GET /health` | | Model, GPU, features. No key |
+| `POST /v1/segment` | `image_base64`, up to 16 `prompts`, `threshold`, optional `exemplars` | Detections with label, box, score, polygons |
+| `POST /v1/embed` | up to 16 `images_base64` | 384-number DINOv2 vectors, L2-normalised |
 
-It reads the weights from the shared app's volume and its key from the Modal secret `sam3-supermarket`. One L40S
-container at most, released five minutes after the last frame. Live, the app now analyses 3 to 4 frames a second with
-answers about 0.4 s behind (it was 1.5 a second and 1.2 s on the shared endpoint).
+- The weights are read from the Modal volume `deck-twin-sam31`. The API key comes from the Modal secret
+  `sam3-supermarket`, sent as `x-api-key`.
+- One L40S container at most. It switches off five minutes after the last frame and takes up to a minute to start.
+  The shop floor page wakes it when it opens and keeps it awake while in use, so Start is immediate in a demo.
+- Live, the app analyses 3 to 4 frames a second with answers about 0.4 s behind.
+- The DeepSeek vision model is a separate Modal endpoint, called with `Modal-Key` and `Modal-Secret` headers.
 
-## Books: who took which title
+### Render: the web service
 
-In `shops/bookshop.json` every book has a name, author, category (`Books`), a section within it, a price and some
-metadata (format, publisher, what the spine looks like). All 27 share the phrase `book`: SAM is asked for it once and
-outlines each book, and which title a shopper took is settled in two steps.
+The repository is a Render Blueprint (`render.yaml`): one Python web service, `uv sync --frozen` from the lockfile,
+Python 3.11, a 1 GB disk at `/var/data`, and health checks on `/healthz` (which, unlike `/api/health`, never wakes the
+GPU). It runs in Virginia, next to the Modal endpoints.
 
-1. **Is it sure they took something?** The frame loop decides that, from the masks: a book counts as taken only when
-   its outline leaves the shelf area in the shopper's hand. Touching, tilting and browsing on the shelf do not count.
-2. **Which titles are they carrying?** Once something is taken, the DeepSeek model is shown that shopper about once
-   a second and asked which catalogue titles are in their hands. Their cart follows those answers:
-   - a title read on **two looks** goes on the cart (onto a pick that has no title yet, or as its own line if the
-     outlines missed that pick, which happens when a book slides straight into a stack). One look is enough when
-     a pick of theirs already carries that title from the shelf it was taken from: shelf and hands agree;
-   - a title that drops out of **three looks in a row**, with the hands in view, comes off again: it was put down.
-     Not while that line's own outline is still in their hand, and not while the look sees as many things in the
-     hands that it cannot read as there are titles it did not list: a book turned away or lying under another one
-     has not been put down;
-   - **one line per title per shopper**. A second line with the same title is the same book seen twice, and is never
-     charged.
-3. **At the door: kept, or back on the shelf?** A leaving shopper's last six pictures, taken about half a second
-   apart, are read again all at once, and settle two things before the check before charging runs.
-   - *Which titles.* A pick that still has no confirmed title (taken in their last seconds in view, or never
-     legible at the time) gets one on the same two-readings rule, applied to what those pictures show.
-   - *Still with them.* A title on the bill that none of those pictures shows in their hands, while at least two of
-     them do show their hands and nothing in them is left unread, went back on a shelf at a moment the outlines
-     missed: it comes off the charge, marked as put back. Things in their hands that no picture could read get the
-     benefit of the doubt, first for picks without a title, then for the titles read most recently.
+1. In Render, **New → Blueprint**, and pick this repository.
+2. Fill in what it asks for: `STAFF_CODE` (at least 8 characters) and the keys from `.env` (`SAM_*`, `LLM_*`,
+   `PAYPAL_CLIENT_*`, `RESEND_*`, `DATABASE_URL`). `JWT_SECRET` is generated. `PAYPAL_ENV` is fixed to `sandbox`.
+3. Deploy. Shoppers use `https://<service>.onrender.com/gate`. Staff open the same address and sign in.
 
-What is not charged is shown as such: a pick whose title was never read in the hands stays on the cart as
-"Not identified, so not charged"; a name that was only read on the shelf (local OCR, `checkout/reader.py`) is shown
-but held back until it is read in the hands. On a tight shelf the outline that follows a hand out is not always the
-one that was read, so a shelf reading alone never bills anyone.
+- **Its own data.** The database, catalogues and clips live on the disk (`DATA_DIR`). On first start the catalogues
+  are copied from `shops/`. After that the disk's copy is the one the catalogue screen edits.
+- **One instance.** Gate tickets, live visits and the sign-in throttle are kept in process memory.
+- **Memory.** Under a 512 MB cap, seven sample visits in a row levelled off at about 375 MB. A finished visit keeps
+  only the pictures its bill was checked against, settled shoppers' frames are dropped, and `MALLOC_ARENA_MAX=2` stops
+  each thread keeping its own memory pool. Only headless OpenCV is installed.
+- **The face models** (`models/*.onnx`, 37 MB) are in the repository, so the build needs nothing else.
+- **Why Starter.** The disk needs a paid plan. The free plan has no disk and sleeps, which would wipe the database.
 
-The shelf itself is read by a local OCR (RapidOCR, about 100 ms a spine) with the second model as a fallback. On the
-photo of the real shelf (`samples/books.jpg`) that names all 27 books; the labels are drawn on the spines.
+### Neon: the face index
 
-A title the outlines wrongly took for put back (a book held right next to the shelf) comes back onto the bill only
-when it is read in the shopper's hands on two more looks.
+With `DATABASE_URL` set, face embeddings are stored in Neon Postgres with pgvector (`checkout/vectors.py`): one table,
+an HNSW index on cosine distance, and one query to find the nearest face:
 
-**Checked on real footage** (`samples/IMG_6401.MOV`, hand-held phone, three books taken and stacked): Elon Musk,
-Blue Ocean Strategy and The 7 Habits of Highly Effective People, USD 249.00. On 10 November 2026, 5 of 5 live
-rehearsals in a row, and one from the page, ended with those three books, that total, and all three confirmed by the
-check before charging. One real run then charged USD 249.00 to the saved sandbox Visa, wrote PayPal invoice 0002
-for the same three lines, and sent the invoice email.
+```sql
+SELECT profile, 1 - (embedding <=> $face) AS score
+FROM checkout_faces ORDER BY embedding <=> $face LIMIT n;
+```
 
-## A camera that moves
+- **Only embeddings and profile ids** go to Neon. Pictures, names, emails and payment links stay in SQLite on the
+  server.
+- **One table per copy.** `FACE_TABLE` gives the Render copy its own table (`checkout_faces_render`), because each copy
+  keeps the table in step with its own database.
+- The floor matches against an in-memory copy of the embeddings, so it never waits on the network.
+- Without `DATABASE_URL`, faces are matched on the server and everything else still works.
 
-Picks are decided by items leaving their resting places, which only works if resting places stay put. For hand-held
-footage the engine follows corner points on the background from frame to frame (people masked out) and carries every
-remembered position, mask and shelf area along with the shift, turn and zoom it finds. Inferring a pick from an item
-that has simply vanished is switched off while the camera is moving.
+### Staff sign-in
 
-## How a pick is decided
+The gate (`/gate`, its API, the PayPal return page) is public. Everything else is private: the floor, the catalogue,
+the dashboard, their APIs and the floor's WebSocket. The guard in `checkout/server.py` is deny-by-default, and a test
+walks every route to keep it that way.
 
-Per analysed frame, one request asks SAM for `person`, `hand`, `item held in hand` and every catalogue phrase
-(`catalog.json`). `checkout/engine.py` then:
+- Staff enter the **staff code** once at `/signin`. The server returns a JWT (HS256, `JWT_SECRET`, 12 hours) as an
+  HttpOnly cookie, and also in the reply for scripts (`Authorization: Bearer …`).
+- Each token is recorded by id with a salted SHA-256 hash, never the token itself. **Sign out** revokes it.
+- Wrong codes are capped: five from one address in ten minutes, and 30 from all addresses together, so guessing
+  from many made-up addresses gets nowhere.
+- On a local computer without `STAFF_CODE`, the staff screens are open to that computer only. A hosted copy refuses to
+  start without both values.
 
-- gives each hand to the shopper whose mask it lies in (and keeps the owner from the previous frame when one shopper
-  reaches across another);
-- fuses catalogue detections with the generic held-item mask into item observations, each knowing which hands touch it;
-- tracks items as *candidate*, *at rest* or *held*, and keeps a decaying tally of hand contact per shopper on each.
+## Data: what is stored where
 
-| Decision | Evidence |
+| Store | Holds |
 |---|---|
-| Pick | a resting item leaves its place while a hand is on it; or an item first seen in a hand stays there across frames |
-| Inferred pick | a steady shelf item is gone, its spot is in view, and a hand had just closed over it |
-| Return | the item sits still with no hand on it, on a shelf or away from the shopper |
-| Inferred return | last seen being put on a shelf, and the shopper's hands have been empty since |
-| Hand-over | only another shopper's hands touch it for over a second |
-| Same item again | an item that was hidden for a moment and reappears in the same shopper's hand is not counted twice |
+| **SQLite** `checkout.db` on the server's disk | `profiles`, `faces` (pictures and embeddings), `visits`, `admissions`, `purchases`, `proofs` (pictures), `refunds`, `staff_tokens` |
+| **Neon Postgres + pgvector** | Face embeddings and profile ids only, for the gate's nearest-face search |
+| **Files on the disk** | Catalogues (`shops/*.json`), product pictures, clips and SAM's cached answers |
+| **PayPal** | Saved payment methods (vault tokens), orders, captures, invoices, refunds |
+| **Modal volume** | SAM 3.1 weights |
 
-The pick goes to the shopper with the largest share of the contact tally, not to whoever is nearest in one frame.
-Thresholds are fractions of the frame diagonal and seconds, so they do not depend on resolution or frame rate.
+Faces are biometric data. Pictures never leave the server. "Delete all shoppers" removes profiles from SQLite and
+their embeddings from Neon. Anyone filmed for real must agree to it first.
 
-### Which product it is
+## Run it locally
 
-SAM's phrases are the first guess, and a phrase does not stay on its own product. With a tissue pack in one hand and
-a power bank in the other, "wireless power bank" outlined both (0.84 and 0.36) and "tissue pack" scored only 0.30
-on its own pack; held edge-on the power bank was "mobile phone" at 0.87. So:
+```bash
+cp .env.example .env    # then fill in the keys
+uv run uvicorn checkout.server:app --port 8765
+```
 
-- **A faint outline beside the phrase's own strong one counts for less.** A vote is weighed by how close it comes to
-  that phrase's best in the frame. Two of one product score alike and keep their name.
-- **The looks can overrule the phrase.** When the second model names another product than the phrase did, and one
-  more thing agrees (a second look, or the likeness to the pictures), the line takes that product. The likeness alone
-  never renames anything: it compares with billable products only, so it would turn a shopper's phone into the power
-  bank it resembles. Books keep their own rules: which title rests on reading it.
-- **A name the looks dispute is not billed on the phrase's word.** The line is held for review ("seen in hand as …").
-- **The final check counts.** It reports how many of each product it sees in hand at once; a product on the bill
-  more often than that is held back for the extra lines. One power bank in hand never pays for two.
+| Screen | Address | For |
+|---|---|---|
+| Gate | http://localhost:8765/gate | Shoppers: be recognised or register, then walk in |
+| Shop floor | http://localhost:8765 | Staff: the camera, each shopper's bag, what happened at the door |
+| Catalogue | http://localhost:8765/catalogue | Staff: products, pictures, adding new ones from a camera or clip |
+| Dashboard | http://localhost:8765/dashboard | Staff: sales, transactions with proof, customers, refunds |
 
-### A closer look at far hands
+On the shop floor, pick a shop and the footage (a camera, a sample clip or a video file), then press Start.
+**Rehearsal** runs everything except the charge, the invoice and the email.
 
-SAM finds an object less well the smaller it is. With the shopper a few steps back, a tissue pack at arm's length
-was not outlined at all; the frame cut down to the hands and blown up 2-3 times gave it 0.45-0.59. So while the hands
-are small in the frame, each frame also goes to SAM cut down to them, round where they were a moment ago, so both
-calls go out together (`checkout/zoom.py`): one cut-out round both hands, or one each when the arms are held out
-apart. What it finds joins the frame's own outlines. Not in a bookshop, whose path reads the whole frame.
+Each item a shopper holds carries a label with its name in the shopper's colour, with a tick once it is sure enough
+to bill. "Live camera" lists every camera the computer can see, and the gate has its own list, so the two stations
+can use different cameras.
 
-Range comes from pixels, so the shop floor asks the camera for full HD and the supermarket sends frames 1600 wide
-(`frame_width`, as the bookshop does). A cut-out never has fewer than 300 of the frame's own pixels across, so a
-sharper frame allows a closer look at someone further back. A few steps back SAM often finds no hands at all. Then
-the closer look goes round each shopper shorter than 60 % of the frame's height instead: their arms and body, head
-and feet left out.
+**From a phone.** A phone browser only shares its camera on an https page: use the Render address, or a tunnel to the
+local server (`ngrok http 8765`).
 
-## Files
+## Configuration
 
-| Path | What |
+Keys live in `.env`, which git ignores. `.env.example` lists them.
+
+| Variable | For |
 |---|---|
-| `checkout/engine.py` | masks to picks, returns and carts |
-| `checkout/people.py` | shopper tracking and re-identification by clothing |
-| `checkout/gate.py` | the gate: recognise or register, then open a visit |
-| `checkout/identity.py` | profiles, faces, gate admissions and visit history in SQLite |
-| `checkout/ledger.py` | every walk-out with its steps, pictures and refunds; what the dashboard reads |
-| `checkout/vectors.py` | face embeddings in Postgres with pgvector |
-| `checkout/payments.py` | PayPal sandbox: save a method in the vault, charge it, write the invoice |
-| `checkout/likeness.py` | how alike a picked item looks to the catalogue's pictures of a product |
-| `checkout/staff.py` | staff sign-in: the staff code for a token, checked against its salted hash |
-| `checkout/paths.py` | where the data lives (`DATA_DIR`) |
-| `checkout/zoom.py` | the closer look round a shopper's hands while they are far from the camera |
-| `checkout/clips.py` | the catalogue screen's footage: clips cut into frames, camera captures, ranking phrases |
-| `checkout/reader.py` | local OCR and matching the text to catalogue titles |
-| `checkout/verify.py` | the vision language model: second looks, titles in the hands, the check before charging |
-| `checkout/mailer.py` | the invoice email through Resend |
-| `modal_app/sam_checkout.py` | the batched SAM 3.1 endpoint on Modal |
-| `shops/` | one catalogue per shop |
-| `checkout/pipeline.py` | one visit: frame order, plus the jobs that run beside it |
-| `checkout/server.py` | the local web server and WebSocket |
-| `web/` | the screens: `index.html` + `app.js` (shop floor), `catalogue.html` + `catalogue.js`, `gate.html` + `gate.js` (gate), `dashboard.html` + `dashboard.js`, the staff header and settings in `shell.js`, the shared wording in `words.js`, one `styles.css` |
-| `checkout/cli.py` | run a video file offline and write an annotated copy |
-| `tools/live_client.py` | play a clip to the running server in real time, from the terminal |
-| `models/` | the two OpenCV face models |
-| `data/checkout.db` | profiles, face pictures and embeddings, admissions, visits. Stays on this machine |
+| `SAM_URL`, `SAM_API_KEY` | The SAM 3.1 endpoint on Modal |
+| `SAM_MAX_PROMPTS`, `SAM_MAX_FPS` | What that endpoint takes: phrases per request, frames per second |
+| `LLM_URL`, `LLM_MODAL_KEY`, `LLM_MODAL_SECRET` | The DeepSeek vision model on Modal |
+| `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_ENV` | PayPal. `PAYPAL_ENV` must be `sandbox`, or payments stay off. Only `api-m.sandbox.paypal.com` is ever called |
+| `DATABASE_URL` | Neon Postgres with pgvector, for the face index |
+| `FACE_TABLE` | This copy's own face table |
+| `RESEND_API_KEY`, `RESEND_FROM` | Invoice emails |
+| `STAFF_CODE`, `JWT_SECRET` | Staff sign-in |
+| `DATA_DIR` | Where the database, catalogues and clips live |
+| `DEMO_EMAIL` | Prefilled in the registration form on a local computer, never on the public gate |
 
-## Tests
+PayPal, Neon and email are each optional. Without one, that part switches off and the screens say so.
+
+## Results
+
+| What | Result |
+|---|---|
+| **End to end on real footage** | Hand-held phone clip, three books taken and stacked (`samples/IMG_6401.MOV`). On 10 November 2026, 5 of 5 rehearsals in a row billed the right three books, USD 249.00, all confirmed by the final check |
+| **A real sandbox payment** | USD 249.00 charged to a saved sandbox card, PayPal invoice 0002 written and marked paid, invoice email sent |
+| **SAM 3.1 per frame** | 139 ms for eight phrases on an L40S, batched, against 290 ms one phrase at a time |
+| **Live speed** | 3 to 4 analysed frames a second, answers about 0.4 s behind the camera |
+| **Faces** | Found and embedded in about 15 ms on the server's CPU. Nearest-face search in Neon in about 110 ms |
+| **Far-off items** | The closer look round small hands took a tissue pack at arm's length from not found to scores of 0.45 to 0.59 |
+| **Likeness** | A pack in a shopper's hand scored 0.71 against its own catalogue picture, enough to name it |
+| **Several shoppers** | Five shoppers at once in the crowd test: each charged once, only for what they carried out |
+| **Memory on Render** | Seven sample visits in a row levelled off at about 375 MB inside a 512 MB plan |
+| **Tests** | 127 passing |
+
+## Tests and rehearsals
 
 ```bash
 uv run pytest
 ```
 
-`tests/test_engine.py` covers the pick logic on synthetic masks (two shoppers at one shelf, put-backs, bags,
-hand-overs, re-entry). `tests/test_crowd.py` runs five shoppers at once and checks that only what was carried out is
-charged, once. `tests/test_books.py` covers books: a title is billed only once read in the hands, never twice, an
-unread one is not charged, and stray outlines are folded away. `tests/test_gate.py` covers the gate (known face let
-in, new face registered with a card or a PayPal account, the vector index) and that the floor bills open visits
-only. `tests/test_paypal.py` runs the PayPal provider against a stand-in for PayPal's API, and checks it refuses
-anything but the sandbox, and that a refund goes back once. `tests/test_last_check.py` covers the check before
-charging. `tests/test_zoom.py` covers the closer look round far hands. `tests/test_staff.py` covers staff sign-in and walks every route to check that only the gate is public. `tests/test_catalogue.py` covers the catalogue screen: pictures kept through a save, clips and camera captures cut
-into frames, phrases ranked by whether they outline the picked object, the most different views kept, and the
-likeness check (votes only when clear, off without `/v1/embed`). `tests/test_ledger.py` covers the ledger: the steps, pictures and numbers kept for a walk-out, rehearsals
-kept apart from sales, refunds at most once, a held-back line charged by hand once, two runs charging once, and a
-shopper recognised again keeping one bag.
+| Test | Covers |
+|---|---|
+| `test_engine.py` | Pick logic on synthetic masks: two shoppers at one shelf, put-backs, hand-overs, re-entry |
+| `test_crowd.py` | Five shoppers at once: only what was carried out is charged, once |
+| `test_books.py` | A title is billed only once read in the hands, never twice |
+| `test_gate.py` | Known face let in, new face registered with a card or PayPal account, the vector index, open visits only |
+| `test_paypal.py` | The PayPal provider against a stand-in API: sandbox only, a refund goes back once |
+| `test_last_check.py` | The check before charging |
+| `test_left_behind.py` | Items no longer linked to the shopper at the door are held, not charged |
+| `test_zoom.py` | The closer look round far hands |
+| `test_staff.py` | Staff sign-in, and every route checked so only the gate is public |
+| `test_catalogue.py` | Pictures, clips, phrase ranking, the most different views, the likeness check |
+| `test_ledger.py` | Steps and pictures kept, rehearsals apart from sales, refunds and manual charges at most once |
+
+Play a clip to the running server as if it were a camera:
 
 ```bash
-uv run tools/live_client.py samples/IMG_6401.MOV --shop bookshop --width 1600 --dry   # rehearsal: no charge, no invoice, no email
-uv run tools/live_client.py samples/IMG_6401.MOV --shop bookshop --width 1600         # for real: charges the registered shopper
+uv run tools/live_client.py samples/IMG_6401.MOV --shop bookshop --width 1600 --dry   # rehearsal: no charge, no email
+uv run tools/live_client.py samples/IMG_6401.MOV --shop bookshop --width 1600         # real: charges the registered shopper
 uv run python -m checkout.cli samples/49350-720.mp4 --fps 3 --verify                  # offline, annotated video in out/
 ```
 
-Rehearse before any real run: a real run charges the sandbox method and sends the invoice email. Only someone the
-gate has let in is charged, so register at the gate screen first (a rehearsal leaves the visit open).
+Rehearse before any real run. Only a shopper the gate has let in is charged, so register at the gate first.
 
-## Limits worth knowing
+## Built to expand
 
-- **Frame rate.** 3 to 4 analysed frames a second, picture about 1.5 s behind the footage. A grab that is over in a
-  fraction of a second can still be missed.
-- **Books lean on the second model.** Titles are billed from what DeepSeek reads in the hands. A book whose title
-  never faces the camera, or is too small in the picture to read, is not identified and so not charged; the bag
-  and the dashboard say so, with the pictures. A camera that sees the shopper side-on from across a room reads few
-  titles: it should face the shopper, as in the sample clip. Two copies of one title in the same hands are billed
-  once.
-- **One real book clip so far.** One shopper, three books, a moving camera. Several shoppers at one bookshelf, and
-  putting a book back, are covered only by synthetic tests.
-- **Products are found by phrase.** A vague phrase scores low; the catalogue screen's phrase test shows which phrase
-  SAM actually outlines a product by, and the pictures add a likeness check, but SAM itself cannot be shown a
-  product photo from elsewhere. A real shop would still give each product its own trained signature.
-- **Two items in one hand-full are tested on one picture.** The naming rules and the final check's count were
-  worked out on one frame of a tissue pack and a power bank, and with synthetic tests. Products that a phrase cannot
-  tell apart and that look alike on camera will still be held for review rather than billed.
-- **The closer look costs a SAM call.** While the hands are small, or a far-off shopper's hands are not found, a
-  frame takes two or three calls instead of one. Full HD frames are also bigger to send from a phone.
-  On the supermarket sample, with it on, answers came back about 1.2 s after each frame (median).
-- **The likeness check is tuned on one clip.** 0.55 and the 0.05 lead were set from a handful of pictures; a
-  picture taken from the same clip it is then tested on is the easy case. Products that look alike (two flavours
-  of one brand) still need the second model to read them apart.
-- **One camera.** An item put in a trolley parked in front of a shelf looks like an item put back on it. And
-  "walked out" is only "out of this camera's view for a few seconds": a real shop would use a camera at the door.
-- **Out of sight looks like left behind.** An item carried out of the camera's view (in the other hand, below the
-  picture) for more than 6 seconds before the shopper leaves, and not visible on them at the door, is held for
-  review rather than charged. Staff can still charge it from the dashboard.
-- **Refunds stop at the payment.** The PayPal invoice written at the door still reads as paid after a refund, and
-  no email is sent about it.
-- **One staff code for everyone.** Staff sign in with a single shared code, not personal accounts; there is no
-  record of which member of staff did what. Changing `STAFF_CODE` does not end sessions already open; changing
-  `JWT_SECRET` does.
-- **PayPal sandbox, USD.** PayPal does not charge in AED, so the catalogues are priced in USD (same numbers).
-  Saving a card needs a sandbox app on a business account that takes cards (US); saving a PayPal account works
-  on any.
-- **The check before charging confirms "taken" well and "put back" weakly.** It reliably refuses an item that was
-  never in the shopper's hands. It only calls a put-back when a picture shows the item at rest again, which a
-  far-off shelf of spines rarely does; put-backs are mostly caught earlier, by the outlines and by the title
-  dropping out of the hands.
-- **One camera per station.** The floor recognises a shopper by their face, so someone who never faces the floor
-  camera stays "not registered" and is not charged.
-- **GPU cost.** The L40S bills only while it is up: from the first frame until five minutes after the last.
-- **Resend's default sender** only delivers to the address that owns the Resend account.
-- **Faces are biometric data.** The pictures never leave this machine. With `DATABASE_URL` set the embeddings are
-  stored in that Postgres database. "Delete all shoppers" removes both, but anyone filmed for real needs to have
-  agreed to it.
+The system is built to grow from a single shelf to a whole store. It already tracks several shoppers at once, each
+with their own cart, from the moment the gate lets them in until they walk out: what each person picks up goes on
+their cart, what they put back comes off, and each is charged only for what they carry out. More cameras, more
+products and more shops plug into the same pipeline.
+
+## Files
+
+| Path | What |
+|---|---|
+| `checkout/server.py` | Web server, WebSocket, staff guard |
+| `checkout/pipeline.py` | One visit: frames in order, plus the side jobs beside them |
+| `checkout/engine.py` | Masks to picks, returns and bags |
+| `checkout/people.py` | Shopper tracking and re-identification by clothing |
+| `checkout/gate.py` | The gate: recognise or register, then open a visit |
+| `checkout/identity.py` | Profiles, faces, admissions and visits in SQLite |
+| `checkout/vectors.py` | Face embeddings in Neon with pgvector |
+| `checkout/verify.py` | The vision model: second looks, titles, the check before charging |
+| `checkout/likeness.py` | How alike a picked item looks to a product's pictures |
+| `checkout/zoom.py` | The closer look round far hands |
+| `checkout/reader.py` | Local OCR and matching text to titles |
+| `checkout/sam_client.py` | Client for the SAM endpoint |
+| `checkout/payments.py` | PayPal sandbox: vault, charge, invoice, refund |
+| `checkout/ledger.py` | Every walk-out with its steps, pictures and refunds |
+| `checkout/mailer.py` | The invoice email through Resend |
+| `checkout/staff.py` | Staff sign-in |
+| `checkout/clips.py` | Catalogue footage: clips, camera captures, phrase ranking |
+| `checkout/catalog.py` | Loading and saving a shop's catalogue |
+| `checkout/cli.py` | Run a video offline and write an annotated copy |
+| `modal_app/sam_checkout.py` | The batched SAM 3.1 + DINOv2 endpoint on Modal |
+| `shops/` | One catalogue per shop, with its pictures |
+| `web/` | The screens: gate, shop floor, catalogue, dashboard, shared header and styles |
+| `tools/live_client.py` | Play a clip to the running server in real time |
+| `tools/draw_diagrams.py` | Draws the diagrams in `docs/diagrams/` |
+| `models/` | The two OpenCV face models |
+| `render.yaml` | The Render Blueprint |
