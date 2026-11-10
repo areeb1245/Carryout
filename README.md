@@ -57,8 +57,8 @@ PayPal, the database and email are each optional: without one, that part switche
 - **New face:** the form asks for a name, an email address and how to pay:
   - *PayPal account*: a vault setup token with `usage_type: MERCHANT`; the shopper approves it in a PayPal window,
     PayPal sends them back to `/gate/return`, and the approval is exchanged for a payment token.
-  - *Card*: a sandbox test card saved the same way (setup token, then payment token). This needs card saving
-    ("Vault") switched on for the sandbox app in the PayPal developer dashboard; without it PayPal answers
+  - *Card*: a sandbox test card saved the same way (setup token, then payment token). This needs a sandbox app
+    whose business account can take cards (a US one does); otherwise PayPal answers
     `NOT_ENABLED_TO_VAULT_PAYMENT_SOURCE` and the gate says so.
   Nothing is saved until the payment method is: no method, no profile, no way in.
 - **Known face without a usable method** (for example a profile from the Stripe version): asked to add one.
@@ -155,7 +155,8 @@ when it is read in the shopper's hands on two more looks.
 **Checked on real footage** (`samples/IMG_6401.MOV`, hand-held phone, three books taken and stacked): Elon Musk,
 Blue Ocean Strategy and The 7 Habits of Highly Effective People, USD 249.00. On 10 November 2026, 5 of 5 live
 rehearsals in a row, and one from the page, ended with those three books, that total, and all three confirmed by the
-check before charging.
+check before charging. One real run then charged USD 249.00 to the saved sandbox Visa, wrote PayPal invoice 0002
+for the same three lines, and sent the invoice email.
 
 ## A camera that moves
 
@@ -245,7 +246,8 @@ gate has let in is charged, so register at the gate screen first (a rehearsal le
   would give each product its own trained signature.
 - **One camera.** An item put in a trolley parked in front of a shelf looks like an item put back on it.
 - **PayPal sandbox, USD.** PayPal does not charge in AED, so the catalogues are priced in USD (same numbers).
-  Saving a card needs Vault switched on for the sandbox app; saving a PayPal account works as it is.
+  Saving a card needs a sandbox app on a business account that takes cards (US); saving a PayPal account works
+  on any.
 - **The check before charging confirms "taken" well and "put back" weakly.** It reliably refuses an item that was
   never in the shopper's hands. It only calls a put-back when a picture shows the item at rest again, which a
   far-off shelf of spines rarely does; put-backs are mostly caught earlier, by the outlines and by the title

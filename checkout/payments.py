@@ -28,7 +28,7 @@ CURRENCIES = {"AUD", "BRL", "CAD", "CNY", "CZK", "DKK", "EUR", "HKD", "HUF", "IL
 #: PayPal's published sandbox card numbers, offered at the gate so nobody types a real one
 _SANDBOX_CARDS = {
     "visa": {"number": "4012888888881881", "expiry": "2030-12", "security_code": "123"},
-    "mastercard": {"number": "5425233430109903", "expiry": "2030-12", "security_code": "123"},
+    "mastercard": {"number": "5555555555554444", "expiry": "2030-12", "security_code": "123"},
 }
 TEST_CARDS = {"visa": "Visa test card", "mastercard": "Mastercard test card"}
 #: issues PayPal reports when the payment method itself said no, as opposed to the request being wrong
