@@ -43,6 +43,17 @@ HANDS = (
     "Leave out anything you cannot read well enough to be sure of, and anything standing on a shelf or lying on a table. "
     "An empty list is a fine answer."
 )
+STILL = (
+    "You check one frame from a shop's camera, taken as a shopper leaves. A yellow box marks the shopper. "
+    "Say which catalogue items this person is still carrying: in a hand, under an arm, or held against the body. "
+    "Go by each item's look (shape, colour, packaging) and any text printed on it; catalogue pictures of some "
+    "products follow the frame. Reply with JSON only: "
+    '{"hands_seen": how many of this shopper\'s hands you can see clearly, 0, 1 or 2, "products": [catalogue ids], '
+    '"unknown": number of carried things you cannot match to any catalogue entry, "why": at most 16 words}. '
+    "The shopper's own things (marked as such) are in the catalogue so you can tell them apart: list them too when "
+    "carried. An item resting on a shelf, table or floor, or in somebody else's hand, is not carried. "
+    "An empty list is a fine answer."
+)
 SHELF = (
     "You check one frame from a shop's camera. A yellow box marks one item standing on a shelf. "
     "Say which catalogue entry it is, going by the text printed on it. Reply with JSON only: "
@@ -113,6 +124,23 @@ class Verifier:
         except (TypeError, ValueError):
             unreadable = 0
         return {"products": [p for p in dict.fromkeys(listed) if isinstance(p, str) and p in known], "unreadable": unreadable, "hands_visible": answer.get("hands_visible") is not False, "why": answer["why"]}
+
+    async def still_carried(self, frame: np.ndarray, box: list[float], products: list[Product], refs: list[tuple[str, bytes]] | None = None) -> dict | None:
+        """At the door, for products told apart by their look rather than a title: which of `products` the boxed
+        shopper still carries. Returns {products: [ids], unknown, hands_seen: 0..2, why}, or None."""
+        answer = await self._ask(STILL, frame, box, products, "", refs)
+        if answer is None:
+            return None
+        known = {p.id for p in products}
+        listed = answer.get("products") if isinstance(answer.get("products"), list) else []
+
+        def number(key: str, top: int) -> int:
+            try:
+                return min(top, max(0, int(answer.get(key) or 0)))
+            except (TypeError, ValueError):
+                return 0
+
+        return {"products": [p for p in dict.fromkeys(listed) if isinstance(p, str) and p in known], "unknown": number("unknown", 9), "hands_seen": number("hands_seen", 2), "why": answer["why"]}
 
     async def name_item(self, frame: np.ndarray, box: list[float], products: list[Product], ocr_text: str = "") -> dict | None:
         """Which of `products` the boxed shelf item is. Returns {product, why}, or None."""

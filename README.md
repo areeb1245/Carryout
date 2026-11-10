@@ -189,6 +189,14 @@ nothing carried through the gap is billed twice.
      in a stack, or one of several books with no picture of its own. Otherwise not charged.
    No answer from the model, or no picture kept, means not charged. The bag shows each verdict with its reason
    and the pictures the check was shown.
+6. **Still linked to the shopper?** Before that check, every product without a title (books have their own door
+   reading, below) must still be linked to the shopper as they leave. Either the floor saw it with them in their
+   last 6 seconds in view (`LINK_S`), or the vision model, shown their last six pictures, sees it on them; it is told
+   products apart by their look and the catalogue pictures. Neither means the item dropped out of sight well before
+   they left and is not with them now, which is what an item put down out of the camera's view looks like. The line
+   is held for review instead of charged. Something in their hands the model cannot match to the catalogue gives the
+   most recently seen item the benefit of the doubt. And an item seen lately still comes off the bill, as put back,
+   when two or more door pictures show both hands with nothing in them but things the model can name.
 6. **Charge.** The kept lines, in one Orders v2 payment against the saved method (`vault_id`), shopper not present,
    with a `PayPal-Request-Id` so a retry cannot charge twice.
 7. **Invoice.** A PayPal invoice (Invoicing API) with the lines and their category and section, marked as paid. The
@@ -496,6 +504,9 @@ gate has let in is charged, so register at the gate screen first (a rehearsal le
   of one brand) still need the second model to read them apart.
 - **One camera.** An item put in a trolley parked in front of a shelf looks like an item put back on it. And
   "walked out" is only "out of this camera's view for a few seconds": a real shop would use a camera at the door.
+- **Out of sight looks like left behind.** An item carried out of the camera's view (in the other hand, below the
+  picture) for more than 6 seconds before the shopper leaves, and not visible on them at the door, is held for
+  review rather than charged. Staff can still charge it from the dashboard.
 - **Refunds stop at the payment.** The PayPal invoice written at the door still reads as paid after a refund, and
   no email is sent about it.
 - **One staff code for everyone.** Staff sign in with a single shared code, not personal accounts; there is no

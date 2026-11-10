@@ -65,6 +65,7 @@ VIEW_GAP_S = 1.0  # how often a carrying shopper's picture is kept for the check
 AUDIT_PICTURES = 5
 LAST_LOOKS = 6  # pictures of a leaving shopper that are read once more at the door
 LAST_GAP_S = 0.45  # how far apart those are taken
+LINK_S = 6.0  # a product not seen with the shopper in their last this-many seconds in view is not linked to them any more
 PROOF_SIDE = 896  # longer side of the pictures kept in the ledger
 
 
@@ -755,6 +756,58 @@ class Session:
         if len(engine.events) > first:
             self._update(first)
 
+    async def _last_goods(self, pid: int) -> None:
+        """Is each product on the bill still with the shopper as they leave? For products told apart by their look,
+        not by a title (books have their own door reading, `_last_looks`).
+
+        A line is charged only while something still links the item to the shopper at the end:
+
+        Seen lately.    The floor saw the item with them in their last `LINK_S` seconds in view.
+        Seen at the door. The second model, shown their last few pictures, sees it on them.
+
+        Neither, and the line is held back for review ("unclear"): the item dropped out of sight well before they left
+        and is not with them now, which is what an item put down out of the camera's view looks like. Things in their
+        hands at the door that the model could not match to the catalogue are given the benefit of the doubt, the
+        items seen most recently first. And an item seen lately is still taken off ("put back") when the door pictures
+        show both of their hands, twice or more, with nothing in them the model cannot name and not this item."""
+        engine, verifier = self.engine, self.services.verifier
+        lines = [e for e in engine.unpaid(pid) if not self.catalog.family_of(e.item.seen_as)]
+        if not lines:
+            return
+        person = engine.people.people.get(pid)
+        left_t = person.last_t if person is not None else engine.t
+        answers = []
+        memo = self.evidence.setdefault(pid, {"read": {}, "recent": []})
+        frames = [kept for kept in memo.get("last", []) if kept[1] is not None]
+        if verifier is not None and verifier.enabled and frames:
+            goods = [p for p in self.catalog.products if not self.catalog.family_of(p.id)]
+            billed = list(dict.fromkeys(e.item.cls for e in lines))
+            refs = self._references([self.catalog.by_id[c] for c in billed] + [p for p in goods if p.id not in billed])
+            got = await asyncio.gather(*(verifier.still_carried(frame, box, goods, refs) for _, frame, box, _ in frames), return_exceptions=True)
+            answers = [(t, view, a) for (t, _, _, view), a in zip(frames, got) if isinstance(a, dict)]
+        with_them: set[str] = set()
+        for t, view, answer in answers:
+            for product in answer["products"]:
+                with_them.add(product)
+                memo["read"][product] = (t, view)  # the picture of them leaving with it, for the check before charging
+        both = [a for _, _, a in answers if a["hands_seen"] >= 2]
+        unknown = max((a["unknown"] for _, _, a in answers), default=0)
+        first = len(engine.events)
+        unlinked = []
+        for entry in lines:
+            if entry.item.cls in with_them:
+                continue
+            gap = max(0.0, left_t - entry.item.last_t)
+            if gap > LINK_S:
+                unlinked.append((gap, entry))
+            elif len(both) >= 2 and unknown == 0:
+                engine.apply_audit(entry.id, "put_back", f"Not in either hand in the last {len(both)} pictures")
+        unlinked.sort(key=lambda x: x[0])
+        for gap, entry in unlinked[unknown:]:
+            engine.apply_audit(entry.id, "unclear", f"Not seen with the shopper as they left (last in hand {gap:.0f} s earlier)")
+        if len(engine.events) > first:
+            self._update(first)
+
     # reading the stock
 
     def _read_shelf(self, t: float, frame: np.ndarray, state: dict) -> None:
@@ -879,6 +932,7 @@ class Session:
         floor = {e.id for e in engine.entries if e.person == pid and e.verified == "confirmed"}
         if pid in self.who:
             await self._last_looks(pid)
+            await self._last_goods(pid)
         first = len(engine.events)
         if self.hand_asks.get(pid, (0, 0.0))[0] >= 3:
             # Their hands were read several times. A pick that never got a confirmed title from those readings is a
