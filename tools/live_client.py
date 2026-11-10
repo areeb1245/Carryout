@@ -11,7 +11,7 @@ method on file is let in; a new one is registered with --name, --email and a san
 card saving switched on for the PayPal sandbox app. Saving a PayPal account needs a person to approve it in a
 browser, so that is done on the gate screen (http://localhost:8765/gate), not here.
 """
-import argparse, asyncio, json, time, urllib.request
+import argparse, asyncio, json, os, time, urllib.request
 import cv2, websockets
 
 
@@ -48,15 +48,19 @@ async def main():
     ap.add_argument("--name", default="Test shopper"); ap.add_argument("--email", default=""); ap.add_argument("--card", default="visa")
     ap.add_argument("--record", help="write every message from the server to this JSON file")
     ap.add_argument("--dry", action="store_true", help="rehearsal: no charge, no invoice and no email");
+    ap.add_argument("--staff-code", default=os.environ.get("STAFF_CODE", ""), help="signs in first, where the server has a staff code (default: $STAFF_CODE)")
     ap.add_argument("--shop", default="bookshop"); ap.add_argument("--fps", type=float, default=5.0); ap.add_argument("--in-flight", type=int, default=4); ap.add_argument("--width", type=int, default=960)
     a = ap.parse_args()
+    base = a.url.replace("wss://", "https://").replace("ws://", "http://").replace("/ws", "")
+    auth = {}
+    if a.staff_code:  # the staff screens are private: trade the code for a token, sent as a Bearer header
+        auth = {"Authorization": "Bearer " + call(base + "/api/staff/signin", {"code": a.staff_code})["token"]}
     # like the page: wake the GPU first, so the clip is not half over before the first answer comes back
-    health = a.url.replace("ws://", "http://").replace("/ws", "/api/health"); t_wake = time.perf_counter()
-    print("model:", json.load(urllib.request.urlopen(health, timeout=180)), f"({time.perf_counter() - t_wake:.1f}s to wake)")
-    base = a.url.replace("ws://", "http://").replace("/ws", "")
+    t_wake = time.perf_counter()
+    print("model:", json.load(urllib.request.urlopen(urllib.request.Request(base + "/api/health", headers=auth), timeout=180)), f"({time.perf_counter() - t_wake:.1f}s to wake)")
     if a.gate: through_the_gate(a, base)
     cap = cv2.VideoCapture(a.clip); fps = cap.get(cv2.CAP_PROP_FPS) or 25; n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)); length = n / fps
-    async with websockets.connect(a.url, max_size=None) as ws:
+    async with websockets.connect(a.url, max_size=None, additional_headers=auth) as ws:
         await ws.send(json.dumps({"type": "start", "shop": a.shop, "dry": a.dry}))
         ready = json.loads(await ws.recv()); session = ready["session"]; print("services:", ready["services"])
         recorded = []; shelf = {}; printed = set()

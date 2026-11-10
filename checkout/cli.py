@@ -106,9 +106,10 @@ def describe(event: dict, state: dict) -> str:
         case "handover":
             return f"{t}  Shopper {event['from_person']} handed {name} to {who}"
         case "checkin":
-            return f"{t}  {who} is {event['name']}, let in at the gate ({event.get('method') or 'no payment method'})"
+            where = "checked in on the shop floor, not at the gate" if event.get("how") == "floor" else "let in at the gate"
+            return f"{t}  {who} is {event['name']}, {where} ({event.get('method') or 'no payment method'})"
         case "unregistered":
-            return f"{t}  {who} is not registered at the gate{' (face matches ' + event['name'] + ', who has no open visit)' if event.get('name') else ''}: nothing will be charged"
+            return f"{t}  {who} is not identified{' (resembles ' + event['name'] + ', match too weak)' if event.get('name') else ''}: nothing will be charged"
         case "audit":
             return f"{t}  Check before charging, {name}: {event['verdict']} ({event['why']})"
         case "invoice":

@@ -1,10 +1,20 @@
-.venv/
+# secrets and local settings: never in the repository
 .env
-.cache/
+.env.*
+!.env.example
+.claude/
+NEXT_SESSION_PROMPT.md
+
+# what the shop writes (database, faces, clips, caches) and working files
+data/
 scratch/
 out/
+.cache/
+
+# Python
+.venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+
 .DS_Store
-data/
-models/*.onnx

@@ -7,6 +7,10 @@ form a family: SAM is asked for the phrase once ("book"), and which member an it
 reading it (reader.py) and asking the second model (verify.py). A family's head stands in for "one of these, not
 yet known which"; it has no price and is never billed.
 
+A product can carry up to four `examples`: pictures of it, cut out of footage in the catalogue screen and stored
+in `shops/<shop>/examples/`. They are shown in the catalogue, compared with what a shopper picks up (likeness.py), and
+shown to the second model next to the item it is asked about.
+
 Entries under `belongings` are things shoppers bring with them (a phone, a wallet): they are tracked so they are never
 mistaken for stock, and never billed.
 """
@@ -22,6 +26,8 @@ HAND = "hand"
 #: catches anything in a hand, whatever it is, so an item outside the catalogue is still seen and flagged
 HELD = "item held in hand"
 DEFAULT_ZONES = ["shelf", "refrigerator", "display rack"]
+MAX_EXAMPLES = 4
+EXAMPLE_NAME = re.compile(r"^ex-[a-f0-9]{8,32}\.jpg$")
 
 
 @dataclass
@@ -38,6 +44,7 @@ class Product:
     meta: dict = field(default_factory=dict)  # anything else worth keeping: format, publisher, language
     family: str | None = None  # id of the family head, for members
     head: bool = False  # the stand-in for "some member of this family"
+    examples: list[str] = field(default_factory=list)  # picture files in shops/<shop>/examples/
 
 
 @dataclass
@@ -47,6 +54,8 @@ class Catalog:
     zones: list[str] = field(default_factory=lambda: list(DEFAULT_ZONES))
     name: str = "Shop"
     frame_width: int = 960  # longer side of the frames sent for analysis; reading titles needs more than outlines do
+    leave_after_s: float = 3.0  # a shopper out of the camera's view for this long has walked out, and is charged
+    shop: str = ""  # the file stem in shops/, where the example pictures live; set by whoever loaded it
 
     def __post_init__(self):
         self.by_id: dict[str, Product] = {p.id: p for p in self.products}
@@ -100,6 +109,7 @@ class Catalog:
                     author=str(raw.get("author") or "")[:80], cues=str(raw.get("cues") or "")[:160],
                     category=str(raw.get("category") or "").strip()[:40], section=str(raw.get("section") or "").strip()[:40],
                     meta={str(k)[:24]: str(v)[:80] for k, v in (raw.get("meta") or {}).items()} if isinstance(raw.get("meta"), dict) else {},
+                    examples=[str(e) for e in (raw.get("examples") or []) if EXAMPLE_NAME.match(str(e))][:MAX_EXAMPLES] if isinstance(raw.get("examples"), list) else [],
                 )
             )
         for i, raw in enumerate(data.get("belongings", [])):
@@ -108,11 +118,17 @@ class Catalog:
                 products.append(Product(f"own{i}", prompt.capitalize(), prompt, 0.0, billable=False))
         zones = [str(z).strip().lower()[:80] for z in data.get("zones", DEFAULT_ZONES) if str(z).strip()]
         width = min(1920, max(640, int(data.get("frame_width") or 960)))
-        return cls(products, str(data.get("currency", "USD"))[:6], zones, str(data.get("name") or "Shop")[:40], width)
+        try:
+            leave = min(30.0, max(1.0, float(data.get("leave_after_s") or 3.0)))
+        except (TypeError, ValueError):
+            leave = 3.0
+        return cls(products, str(data.get("currency", "USD"))[:6], zones, str(data.get("name") or "Shop")[:40], width, leave)
 
     @classmethod
     def load(cls, path: Path) -> "Catalog":
-        return cls.from_dict(json.loads(Path(path).read_text()))
+        catalog = cls.from_dict(json.loads(Path(path).read_text()))
+        catalog.shop = Path(path).stem
+        return catalog
 
     def to_dict(self) -> dict:
         def row(p: Product) -> dict:
@@ -127,12 +143,15 @@ class Catalog:
                 out["section"] = p.section
             if p.meta:
                 out["meta"] = p.meta
+            if p.examples:
+                out["examples"] = p.examples
             return out
 
         return {
             "name": self.name,
             "currency": self.currency,
             "frame_width": self.frame_width,
+            "leave_after_s": self.leave_after_s,
             "products": [row(p) for p in self.products if p.billable],
             "belongings": [p.prompt for p in self.products if not p.billable],
             "zones": self.zones,

@@ -5,7 +5,11 @@
 // picture is shown that much behind the footage: every outline is then drawn on the frame it was computed from,
 // and moved smoothly between two analysed frames.
 
+import { brand, currentShop, mountShell, rememberShop } from "/static/shell.js";
+import { TICK, clockTime, dayOf, describe as describeEvent, esc, lineNote, moneyIn, stamp, unfolded } from "/static/words.js";
+
 const $ = (id) => document.getElementById(id);
+mountShell("floor");
 const PALETTE = ["#3b82f6", "#f59e0b", "#10b981", "#a855f7", "#06b6d4", "#ec4899", "#84cc16", "#f97316"];
 const VIEW_WIDTH = 960; // the picture on screen; frames sent for analysis may be wider (catalogue's frame_width)
 
@@ -17,6 +21,7 @@ const S = {
   ended: false,
   finished: false,
   kind: "sample", // sample | file | camera
+  wall0: 0, // the time of day (ms) at second 0 of a live camera's clock
   stream: null,
   fileUrl: null,
   t0: 0,
@@ -38,6 +43,7 @@ const S = {
   zone: [],
   cartsKey: "",
   eventsKey: "",
+  only: "", // the person whose activity is listed, "" for everyone
 };
 
 const video = $("video");
@@ -46,24 +52,15 @@ const ctx = canvas.getContext("2d");
 const grab = document.createElement("canvas");
 
 const colour = (pid) => PALETTE[(pid - 1) % PALETTE.length];
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-const formats = {};
 // "$249.00" for the shop's currency, or for the one a payment was made in
-function money(n, code) {
-  code = String(code || S.config?.catalog.currency || "USD").toUpperCase();
-  try {
-    formats[code] ??= new Intl.NumberFormat("en", { style: "currency", currency: code });
-    return formats[code].format(Number(n || 0));
-  } catch {
-    return `${code} ${Number(n || 0).toFixed(2)}`;
-  }
-}
-const TICK = `<svg class="mark" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6.5l2.6 2.6L10 3.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-const stamp = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+const money = (n, code) => moneyIn(n, code || S.config?.catalog.currency);
 const ordinal = (n) => `${n}${["th", "st", "nd", "rd"][n % 100 > 10 && n % 100 < 14 ? 0 : Math.min(n % 10, 4) % 4]}`;
 
+// Who a tracked person is: the shopper the gate or the floor checked in, or the registered shopper their face
+// resembles too weakly to charge. Only a face nobody has registered stays a number.
 function nameOf(pid) {
-  return S.meta.people?.[pid]?.profile?.name ?? `Shopper ${pid}`;
+  const who = S.meta.people?.[pid];
+  return who?.profile?.name ?? (who?.name || `Shopper ${pid}`);
 }
 
 // ---------------------------------------------------------------- setup
@@ -71,11 +68,10 @@ function nameOf(pid) {
 async function loadShop(shop) {
   S.config = await (await fetch(`/api/config?shop=${encodeURIComponent(shop ?? "")}`)).json();
   const name = S.config.shops.find((x) => x.id === S.config.shop)?.name ?? "Shop";
-  $("brand").textContent = name;
-  document.title = `${name}: shop floor`;
+  brand(name, "floor");
+  rememberShop(S.config.shop);
   $("shop").innerHTML = S.config.shops.map((x) => `<option value="${esc(x.id)}" ${x.id === S.config.shop ? "selected" : ""}>${esc(x.name)}</option>`).join("");
   fillSources();
-  renderCatalog(S.config.catalog);
 }
 
 // The footage list: a live camera, this shop's sample clips, or a video file.
@@ -122,37 +118,59 @@ async function listCameras(ask = false) {
 navigator.mediaDevices?.addEventListener?.("devicechange", () => listCameras());
 
 async function boot() {
-  await loadShop();
-  renderProfiles(S.config.profiles);
+  await loadShop(currentShop());
   listCameras(); // names are there already if this browser has used a camera here before
-  const sv = S.config.services;
-  $("pay-note").textContent = sv.payments ? "Charged on the way out" : "Payments are off";
-  const row = (on, text) => `<li><span class="dot ${on ? "ok" : "bad"}"></span><span>${esc(text)}</span></li>`;
-  $("services").innerHTML =
-    row(sv.faces, sv.faces ? (sv.face_search === "pgvector" ? "Faces are searched in the Postgres vector index" : "Faces are matched on this computer") : "Face recognition is off: the model files are missing") +
-    row(sv.verifier, sv.verifier ? "Every bag is checked by the second model before it is charged" : "The second model is off, so bags are charged unchecked") +
-    row(sv.payments, sv.payments ? "Payments go through the PayPal sandbox" : `Payments are off: ${sv.payments_note}`) +
-    row(sv.email, sv.email ? "Invoices are emailed" : "Invoice email is off");
+  $("pay-note").textContent = S.config.services.payments ? "Charged at exit" : "Payments off";
   wake();
 }
 
-async function wake() {
+// The camera model runs on a GPU that is switched off when nobody has used it for five minutes, so that it costs
+// nothing overnight. Switching it back on takes up to a minute, and Start has to wait for that. To keep Start
+// instant during a demo, the page asks for it as it opens and keeps it awake while the page is in use.
+const WARM_FOR = 4 * 60 * 1000; // an answer this recent means it is still up
+const STAY_WARM_FOR = 20 * 60 * 1000; // after the last click or run, let it go back to sleep
+let warmAt = -Infinity;
+let usedAt = performance.now();
+let waking = null;
+
+function wake(quiet = false) {
+  if (waking) return waking;
   const dot = $("model-dot");
   const text = $("model-text");
-  dot.className = "dot";
-  text.textContent = "Waking the cameras, up to a minute";
-  try {
-    const r = await fetch("/api/health");
-    if (!r.ok) throw new Error((await r.json()).error);
-    dot.className = "dot ok";
-    text.textContent = "Cameras ready";
-    return true;
-  } catch (e) {
-    dot.className = "dot bad";
-    text.textContent = `The camera model is not answering: ${e.message}`;
-    return false;
+  if (!quiet) {
+    dot.className = "dot";
+    text.textContent = "Starting the vision model (up to a minute)";
   }
+  waking = (async () => {
+    try {
+      const r = await fetch("/api/health");
+      if (!r.ok) throw new Error((await r.json()).error);
+      warmAt = performance.now();
+      dot.className = "dot ok";
+      text.textContent = "Cameras ready";
+      return true;
+    } catch (e) {
+      dot.className = "dot bad";
+      text.textContent = `Vision model unavailable: ${e.message}`;
+      return false;
+    } finally {
+      waking = null;
+    }
+  })();
+  return waking;
 }
+
+document.addEventListener("pointerdown", () => (usedAt = performance.now()), true);
+setInterval(() => {
+  const now = performance.now();
+  if (document.hidden || now - warmAt < WARM_FOR - 30000) return;
+  if (S.running && !S.ended) return void (warmAt = now); // frames are flowing: it is plainly up
+  if (now - usedAt < STAY_WARM_FOR) wake(true);
+  else if (now - warmAt > WARM_FOR + 60000 && $("model-dot").className === "dot ok") {
+    $("model-dot").className = "dot off";
+    $("model-text").textContent = "Vision model idle. Press Start to resume";
+  }
+}, 30000);
 
 // ---------------------------------------------------------------- clock and capture
 
@@ -166,7 +184,7 @@ let lastCapture = 0;
 function capture() {
   if (!S.running || S.ended) return;
   const now = performance.now();
-  if (now - lastCapture >= 66 && video.readyState >= 2 && video.videoWidth) {
+  if (now - lastCapture >= 40 && video.readyState >= 2 && video.videoWidth) {
     lastCapture = now;
     const t = clock();
     const w = Math.min(VIEW_WIDTH, video.videoWidth);
@@ -176,7 +194,7 @@ function capture() {
         if (!S.running) return bmp.close();
         S.frames.push({ t, bmp });
         if (S.frames.length > 1 && S.frames.at(-2).t > t) S.frames.sort((a, b) => a.t - b.t);
-        while (S.frames.length > 140) S.frames.shift().bmp.close();
+        while (S.frames.length > 220) S.frames.shift().bmp.close();
       })
       .catch(() => {});
   }
@@ -218,7 +236,11 @@ async function start() {
   button.disabled = true;
   reset();
   try {
-    if (!(await wake())) throw new Error("the camera model is not reachable");
+    usedAt = performance.now();
+    if (performance.now() - warmAt > WARM_FOR) {
+      button.textContent = "Starting…";
+      if (!(await wake())) throw new Error("the camera model is not reachable");
+    }
     if (choice === "camera") {
       S.kind = "camera";
       const id = $("camera").value;
@@ -236,13 +258,16 @@ async function start() {
     await openSocket();
     await video.play();
     S.t0 = performance.now();
+    S.wall0 = Date.now();
     S.running = true;
+    $("events").classList.toggle("clock", S.kind === "camera"); // a live camera: the activity list shows the time of day
     $("viewer").classList.add("live");
     $("viewer-note").textContent = "";
     button.textContent = "Stop";
     capture();
   } catch (e) {
     note(`Could not start: ${e.message}`);
+    button.textContent = "Start";
     stopMedia();
   }
   button.disabled = false;
@@ -251,12 +276,17 @@ async function start() {
 function openSocket() {
   return new Promise((resolve, reject) => {
     if (S.ws) S.ws.close();
-    const ws = new WebSocket(`ws://${location.host}/ws`);
+    // A page opened over https (through a tunnel such as ngrok, as a phone's camera needs) may only open a secure
+    // socket: a plain ws:// one is blocked by the browser before it reaches the server.
+    const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
     S.ws = ws;
-    ws.onopen = () => ws.send(JSON.stringify({ type: "start", shop: S.config.shop, catalog: readCatalog(), dry: $("dry").checked }));
-    ws.onerror = () => reject(new Error("no connection to the local server"));
+    ws.onopen = () => ws.send(JSON.stringify({ type: "start", shop: S.config.shop, dry: $("dry").checked, live: S.kind === "camera" }));
+    ws.onerror = () => {
+      fetch("/api/staff/me"); // refused because the staff session ran out? that call answers 401, and shell.js sends the page to sign in
+      reject(new Error("no connection to the shop's server"));
+    };
     ws.onclose = () => {
-      if (S.running && S.ws === ws) note("The connection to the local server closed.");
+      if (S.running && S.ws === ws) note("The connection to the shop's server closed.");
     };
     ws.onmessage = (m) => {
       const msg = JSON.parse(m.data);
@@ -304,7 +334,7 @@ function reset() {
   Object.assign(S, {
     running: false, ended: false, finished: false, session: null, stoppedAt: null, seq: 0, inFlight: 0, lastSend: -1,
     frames: [], states: [], inbox: [], delay: 2.2, latencies: [], sentTimes: [], carts: [], events: [], zone: [],
-    meta: { people: {}, payments: {} }, cartsKey: "", eventsKey: "",
+    meta: { people: {}, payments: {} }, cartsKey: "", eventsKey: "", only: "",
   });
   renderCarts();
   renderEvents();
@@ -327,6 +357,62 @@ function movePolys(polys, from, to) {
   return polys.map((poly) => poly.map(([x, y]) => [to[0] + (x - from[0]) * sx, to[1] + (y - from[1]) * sy]));
 }
 
+// An outline changes shape between two analysed frames. To draw the frames in between, the main outline of each
+// is turned into the same number of points, evenly spaced and running the same way round, and the points are moved
+// from one to the other. Without this the shape jumps three or four times a second.
+const RING = 144; // enough points for the outline of a person, arms and all
+
+function ring(o) {
+  if (o.ring !== undefined) return o.ring;
+  let main = null;
+  let most = 0;
+  let turn = 0;
+  for (const poly of o.polygons) {
+    let twice = 0;
+    for (let i = 0; i < poly.length; i++) {
+      const [x0, y0] = poly[i];
+      const [x1, y1] = poly[(i + 1) % poly.length];
+      twice += x0 * y1 - x1 * y0;
+    }
+    if (Math.abs(twice) > most) [main, most, turn] = [poly, Math.abs(twice), Math.sign(twice)];
+  }
+  if (!main || main.length < 3) return (o.ring = null);
+  const pts = turn < 0 ? [...main].reverse() : main;
+  const steps = pts.map((p, i) => Math.hypot(pts[(i + 1) % pts.length][0] - p[0], pts[(i + 1) % pts.length][1] - p[1]));
+  const round = steps.reduce((a, b) => a + b, 0);
+  const out = [];
+  let i = 0;
+  let walked = 0;
+  for (let n = 0; n < RING; n++) {
+    const at = (n / RING) * round;
+    while (i < pts.length - 1 && walked + steps[i] < at) walked += steps[i++];
+    const f = steps[i] ? (at - walked) / steps[i] : 0;
+    const q = pts[(i + 1) % pts.length];
+    out.push([pts[i][0] + (q[0] - pts[i][0]) * f, pts[i][1] + (q[1] - pts[i][1]) * f]);
+  }
+  o.main = main;
+  return (o.ring = out);
+}
+
+// Which point of `b`'s ring goes with the first point of `a`'s: the turn that moves the points least.
+function turnFor(a, b) {
+  if (a.turnTo === b) return a.turn;
+  const [ra, rb] = [ring(a), ring(b)];
+  const [ax, ay, bx, by] = [(a.box[0] + a.box[2]) / 2, (a.box[1] + a.box[3]) / 2, (b.box[0] + b.box[2]) / 2, (b.box[1] + b.box[3]) / 2];
+  let best = 0;
+  let least = Infinity;
+  for (let shift = 0; shift < RING; shift++) {
+    let sum = 0;
+    for (let i = 0; i < RING && sum < least; i += 3) {
+      const q = rb[(i + shift) % RING];
+      sum += (ra[i][0] - ax - q[0] + bx) ** 2 + (ra[i][1] - ay - q[1] + by) ** 2;
+    }
+    if (sum < least) [least, best] = [sum, shift];
+  }
+  a.turnTo = b;
+  return (a.turn = best);
+}
+
 // Objects of state `a`, eased towards where state `b` has them. Things only in one of the two fade in or out.
 function between(listA, listB, k) {
   const out = [];
@@ -335,7 +421,14 @@ function between(listA, listB, k) {
     const next = inB.get(o.id);
     if (next) {
       const box = lerpBox(o.box, next.box, k);
-      out.push({ ...o, box, polygons: movePolys(o.polygons, o.box, box), alpha: 1 });
+      let polygons;
+      if (ring(o) && ring(next)) {
+        const shift = turnFor(o, next);
+        const near = k < 0.5 ? o : next; // the smaller pieces of an outline (a hand beyond a shelf edge) come from the nearer frame
+        polygons = [o.ring.map((p, i) => [p[0] + (next.ring[(i + shift) % RING][0] - p[0]) * k, p[1] + (next.ring[(i + shift) % RING][1] - p[1]) * k])];
+        polygons.push(...movePolys(near.polygons.filter((poly) => poly !== near.main), near.box, box));
+      } else polygons = movePolys(o.polygons, o.box, box);
+      out.push({ ...o, box, polygons, alpha: 1 });
       inB.delete(o.id);
     } else out.push({ ...o, alpha: listB ? 1 - k : 1 });
   }
@@ -392,6 +485,80 @@ function chip(text, x, y, bg, px) {
   ctx.fillText(text, x + 7 * px, y + h / 2 + px * 0.5);
 }
 
+// A small label for something in a shopper's hands: a bar in the shopper's colour, a tick once it is sure, the name.
+// It is moved down past any label already `placed` there, and returns where it ended up.
+function tag(text, sure, x, y, bar, px, placed) {
+  ctx.font = `500 ${12 * px}px "Instrument Sans", ui-sans-serif, system-ui, sans-serif`;
+  if (text.length > 34) text = text.slice(0, 32).trimEnd() + "…";
+  const tick = sure ? 14 * px : 0;
+  const w = ctx.measureText(text).width + 17 * px + tick;
+  const h = 20 * px;
+  x = Math.max(4 * px, Math.min(x, canvas.width - w - 4 * px));
+  y = Math.max(4 * px, y);
+  const hits = (r) => x < r.x + r.w && r.x < x + w && y < r.y + r.h + 2 * px && r.y < y + h + 2 * px;
+  for (let tries = 0; tries < 12 && placed.some(hits); tries++) y += h + 2 * px;
+  y = Math.min(y, canvas.height - h - 4 * px);
+  ctx.fillStyle = "rgba(22,21,19,0.84)";
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, 4 * px);
+  ctx.fill();
+  ctx.fillStyle = bar;
+  ctx.beginPath();
+  ctx.roundRect(x, y, 4 * px, h, [4 * px, 0, 0, 4 * px]);
+  ctx.fill();
+  if (sure) {
+    ctx.strokeStyle = "#8fd9b0";
+    ctx.lineWidth = 1.8 * px;
+    ctx.lineCap = ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(x + 10 * px, y + h / 2 + 0.5 * px);
+    ctx.lineTo(x + 13 * px, y + h / 2 + 3.5 * px);
+    ctx.lineTo(x + 18.5 * px, y + h / 2 - 3.5 * px);
+    ctx.stroke();
+    ctx.lineCap = ctx.lineJoin = "miter";
+  }
+  ctx.fillStyle = sure ? "#fff" : "rgba(255,255,255,0.82)";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  ctx.fillText(text, x + 10 * px + tick, y + h / 2 + px * 0.5);
+  const rect = { x, y, w, h };
+  placed.push(rect);
+  return rect;
+}
+
+// What the label says about a bag line: [text, is it sure enough to be billed]. Where the shop has pictures of the
+// product, how alike the item in hand looks to them follows the name.
+function labelOf(line) {
+  const like = line.likeness && line.likeness.product === line.product ? `  ${Math.round(line.likeness.score * 100)} %` : "";
+  if (line.product && !line.billable && !line.unread) return [`${line.name} (own item)`, false];
+  if (line.unread) return [`${line.name}: identifying`, false];
+  if (line.charge) return [line.name + like, true];
+  if (line.verified === "disputed" || line.repeat || line.audit) return [`${line.name}: held for review`, false];
+  return [`${line.name}: checking${like}`, false];
+}
+
+// A live camera carries the date and the time of day of the frame on screen, top right, like any shop camera.
+function liveStamp(t, px) {
+  if (S.kind !== "camera") return;
+  const at = S.wall0 + t * 1000;
+  ctx.globalAlpha = 1;
+  ctx.font = `500 ${13 * px}px "Instrument Sans", ui-sans-serif, system-ui, sans-serif`;
+  const day = dayOf(at);
+  const w = ctx.measureText(`${day}  00:00:00`).width + 16 * px; // sized for the widest digits, so it does not twitch
+  const h = 24 * px;
+  const x = canvas.width - w - 8 * px;
+  ctx.fillStyle = "rgba(22,21,19,0.72)";
+  ctx.beginPath();
+  ctx.roundRect(x, 8 * px, w, h, 4 * px);
+  ctx.fill();
+  ctx.fillStyle = "#fff";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  ctx.fillText(day, x + 8 * px, 8 * px + h / 2 + px * 0.5);
+  ctx.textAlign = "right";
+  ctx.fillText(clockTime(at), x + w - 8 * px, 8 * px + h / 2 + px * 0.5);
+}
+
 function draw() {
   requestAnimationFrame(draw);
   if (!S.running) return;
@@ -432,11 +599,11 @@ function draw() {
     S.states.shift();
     i -= 1;
   }
-  if (i < 0) return;
+  if (i < 0) return liveStamp(frame.t, px);
   const a = S.states[i];
   const b = S.states[i + 1];
   const k = b ? Math.min(1, Math.max(0, (T - a.t) / Math.max(1e-3, b.t - a.t))) : 0;
-  if (!b && T - a.t > 1.5 && !S.ended) return; // nothing fresh to show: better no outline than a stale one
+  if (!b && T - a.t > 1.5 && !S.ended) return liveStamp(frame.t, px); // nothing fresh to show: better no outline than a stale one
 
   if ($("show-zone").checked && S.zone.length) {
     ctx.setLineDash([6 * px, 6 * px]);
@@ -489,6 +656,7 @@ function draw() {
     }
   }
 
+  const boxes = $("show-boxes").checked;
   for (const item of items) {
     if (item.state === "rest" || (item.state === "candidate" && !item.holder)) continue;
     const c = item.holder ? colour(item.holder) : "#ffffff";
@@ -499,18 +667,62 @@ function draw() {
     ctx.lineWidth = 2.5 * px;
     ctx.strokeStyle = c;
     ctx.stroke();
-    if (item.state === "held") chip(item.name, item.box[0] * W, item.box[3] * H + 6 * px, "rgba(22,21,19,0.82)", px);
+    if (boxes && item.state === "held") {
+      // the box the likeness check and the second model are shown
+      const [x0, y0, x1, y1] = item.box;
+      const pad = 4 * px;
+      ctx.lineWidth = 1.5 * px;
+      ctx.setLineDash([6 * px, 4 * px]);
+      ctx.strokeRect(x0 * W - pad, y0 * H - pad, (x1 - x0) * W + 2 * pad, (y1 - y0) * H + 2 * pad);
+      ctx.setLineDash([]);
+    }
   }
 
+  // What is in each shopper's hands, by name. A label sits under the item it names and follows it. A title that is
+  // on their bag but whose outline is hidden (the lower books of a stack) is listed under the same hands, so the
+  // picture always says what the bag says.
   ctx.globalAlpha = 1;
+  const placed = [];
+  const named = new Set();
+  const hands = (k < 0.5 || !b ? a : b).hands;
+  for (const cart of S.carts) {
+    const pid = cart.person;
+    if (!people.some((p) => p.id === pid && p.alpha >= 0.5)) continue;
+    let last = null;
+    const hidden = [];
+    for (const line of cart.lines) {
+      if (line.state !== "in_cart") continue;
+      const item = items.find((o) => o.id === line.item && o.state === "held" && o.alpha >= 0.5);
+      if (!item) {
+        if (!(line.product && !line.billable && !line.unread)) hidden.push(line);
+        continue;
+      }
+      named.add(item.id);
+      last = tag(...labelOf(line), item.box[0] * W, item.box[3] * H + 6 * px, colour(pid), px, placed);
+    }
+    if (!hidden.length) continue;
+    if (!last) {
+      const mine = hands.filter((h) => h.person === pid);
+      if (!mine.length) continue; // their hands are out of view: the label over their head still counts the items
+      last = { x: Math.min(...mine.map((h) => h.box[0])) * W, y: Math.max(...mine.map((h) => h.box[3])) * H + 4 * px, w: 0, h: 0 };
+    }
+    for (const line of hidden) last = tag(...labelOf(line), last.x, last.y + last.h + 2 * px, colour(pid), px, placed);
+  }
+  // something in a hand that is on nobody's bag yet
+  for (const item of items) {
+    if (item.state === "held" && item.alpha >= 0.5 && !named.has(item.id)) tag(item.name, false, item.box[0] * W, item.box[3] * H + 6 * px, item.holder ? colour(item.holder) : "#fff", px, placed);
+  }
+
   const carts = new Map(S.carts.map((cart) => [cart.person, cart]));
   for (const p of people) {
     if (p.alpha < 0.5) continue;
     const cart = carts.get(p.id);
     const n = cart?.count ?? 0;
-    const label = `${nameOf(p.id)}${n ? `  ${n} item${n > 1 ? "s" : ""}  ${money(cart.total)}` : ""}`;
+    const out = S.meta.people?.[p.id]?.status === "not_registered" ? ", not identified" : "";
+    const label = `${nameOf(p.id)}${out}${n ? `  ${n} item${n > 1 ? "s" : ""}  ${money(cart.total)}` : ""}`;
     chip(label, p.box[0] * W, p.box[1] * H - 28 * px, colour(p.id), px);
   }
+  liveStamp(frame.t, px);
 
   const sent = S.sentTimes.filter((t) => performance.now() - t < 5000);
   S.sentTimes = sent;
@@ -527,48 +739,29 @@ function apply(msg) {
   S.meta = msg.meta ?? S.meta;
   if (msg.zone) S.zone = msg.zone;
   for (const e of msg.events ?? []) if (!S.events.some((x) => x.id === e.id)) S.events.push(e);
-  // a pick that turned out to be an item already on the cart under another track: its events go
-  const folded = new Set(S.events.filter((e) => e.type === "void").map((e) => e.entry));
-  if (folded.size) S.events = S.events.filter((e) => e.type !== "void" && !(folded.has(e.entry) && ["pick", "verify"].includes(e.type)));
+  // someone recognised again by their face: what was listed under their new outline's number is theirs
+  for (const same of S.events.filter((e) => e.type === "same")) {
+    for (const e of S.events) {
+      if (e.person === same.was) e.person = same.person;
+      if (e.from_person === same.was) e.from_person = same.person;
+    }
+    if (S.only === String(same.was)) S.only = String(same.person);
+  }
+  S.events = unfolded(S.events);
   if (msg.type === "finished") {
     S.finished = true;
     note(`The footage ended. Everyone still inside was treated as walking out.${S.meta.dry ? " Rehearsal: nobody was charged." : ""}`);
-    refreshProfiles();
   }
-  if (msg.events?.some((e) => e.type === "checkin" || e.type === "payment")) refreshProfiles();
   renderCarts();
   renderEvents();
 }
 
 // ---------------------------------------------------------------- carts
 
-// What the bag says under a line: [text, "" | "took" | "flag", the longer story for a tooltip].
-function lineNote(line) {
-  if (line.state === "returned") return ["Put back, not charged", ""];
-  if (line.state === "given") return ["Handed to another shopper", ""];
-  if (line.product && !line.billable && !line.unread) return ["Their own, not for sale", ""];
-  // the last check before charging has the final word on a line
-  if (line.audit === "put_back") return [`Not charged. The last check saw it put back: ${line.audit_why}`, "flag"];
-  if (line.audit === "unclear") return [`Not charged. The last check could not confirm it: ${line.audit_why}`, "flag"];
-  if (line.audit === "kept") return [`Took it: ${line.audit_why}`, "took"];
-  if (line.paid) return ["Paid", "took"];
-  if (line.verified === "disputed") return [`Held back: the second model saw no item in the hand (${line.why})`, "flag"];
-  if (line.unread) return ["Not identified, so not charged", "flag"];
-  if (line.repeat) return ["Not charged: the same title as a line above (one book seen twice)", "flag"];
-  if (line.billable && !line.charge && line.verified == null) return ["Held back: named from the shelf, not yet read in their hands", "flag"];
-  if (!line.product) return ["Held back: not in the catalogue", "flag"];
-  if (!line.charge) return [`Held back: only ${Math.round(line.confidence * 100)}% sure`, "flag"];
-  // on the bill and still in the shop: one short line, with how it got there kept for the tooltip
-  const how = { carried_in: "Was holding it on arrival", inferred: "It left the shelf under their hand", handover: "Handed over by another shopper", seen: "Not seen leaving the shelf" }[line.origin];
-  const story = [how, line.why].filter(Boolean).join(". ");
-  if (line.verified === "confirmed") return ["Seen in their hands", "", story];
-  return [`${line.origin === "inferred" ? "Left the shelf under their hand, " : ""}${Math.round(line.confidence * 100)}% sure`, "", story];
-}
-
 // What happened at the door, in the order it happens: the last check, the charge, the invoice, the email.
-function door(pay, who) {
+function door(pay, who, cart) {
   const step = (cls, html) => `<li class="${cls}">${cls === "done" ? TICK : ""}<span>${html}</span></li>`;
-  if (!pay) return who.checking ? `<ol class="door">${step("wait", "Checking the bag against the pictures before charging")}</ol>` : "";
+  if (!pay) return who.checking ? `<ol class="door">${step("wait", "Final check in progress")}</ol>` : "";
   const steps = [];
   const amount = money(pay.amount, pay.currency);
   const method = esc(pay.method || "the saved method");
@@ -577,30 +770,32 @@ function door(pay, who) {
   const shots = check.pictures
     ? `<span class="shots">${Array.from({ length: check.pictures }, (_, i) => {
         const src = `/api/evidence/${esc(check.session)}/${check.person}/${i}`;
-        return `<a href="${src}" target="_blank" rel="noopener"><img src="${src}" alt="Picture ${String.fromCharCode(65 + i)} the check was shown" loading="lazy" /></a>`;
+        return `<a href="${src}" target="_blank" rel="noopener"><img src="${src}" alt="Final check, picture ${String.fromCharCode(65 + i)}" loading="lazy" /></a>`;
       }).join("")}</span>`
     : "";
   if (check.status === "checked")
-    steps.push(step(check.held ? "stop" : "done", `Checked before charging: ${check.kept} of ${seen} item${seen === 1 ? "" : "s"} confirmed${check.held ? `, ${check.held} not charged` : ""}${shots}`));
-  else if (check.status === "failed") steps.push(step("stop", "The check before charging got no answer, so nothing was charged"));
+    steps.push(step(check.held ? "stop" : "done", `Final check: ${check.kept} of ${seen} item${seen === 1 ? "" : "s"} confirmed${check.held ? `, ${check.held} held for review` : ""}${shots}`));
+  else if (check.status === "failed") steps.push(step("stop", "Final check unavailable, nothing charged"));
   switch (pay.status) {
     case "succeeded":
       steps.push(step("done", `Paid ${amount} with ${method}`));
       break;
     case "dry":
-      steps.push(step("wait", `Rehearsal: ${amount} would be charged to ${method}`));
+      steps.push(step("wait", `Rehearsal: ${amount} not charged`));
       break;
     case "nothing_due":
-      steps.push(step("wait", "Walked out with nothing to pay"));
+      // empty hands, or things in them that could not be billed: say which, the lines above say why
+      if (cart?.review) steps.push(step("stop", `${cart.review} item${cart.review === 1 ? "" : "s"} held for review, nothing charged`));
+      else steps.push(step("wait", "Left with nothing to pay"));
       break;
     case "not_registered":
-      steps.push(step("stop", `Not registered at the gate, so the ${amount} of items was not charged`));
+      steps.push(step("stop", `${amount} not charged: shopper not registered`));
       break;
     case "declined":
-      steps.push(step("bad", `${method} was declined. ${amount} is unpaid`));
+      steps.push(step("bad", `${method} declined for ${amount}`));
       break;
     case "no_card":
-      steps.push(step("bad", `Walked out with ${amount} of items and no payment method on file`));
+      steps.push(step("bad", `${amount} not charged: no payment method on file`));
       break;
     default:
       steps.push(step("bad", `Not charged (${amount}): ${esc(pay.message)}`));
@@ -609,13 +804,54 @@ function door(pay, who) {
     const sv = S.config.services;
     const inv = pay.invoice;
     if (inv?.status === "created")
-      steps.push(step("done", `Invoice ${esc(inv.number ?? "")} written. <a href="${esc(inv.url)}" target="_blank" rel="noopener">View it on PayPal</a>`));
-    else if (inv) steps.push(step("bad", `The PayPal invoice was not written: ${esc(inv.message)}`));
-    else if (sv.provider === "paypal" && !S.finished) steps.push(step("wait", "Writing the PayPal invoice"));
-    if (pay.email) steps.push(pay.email.status === "sent" ? step("done", `Invoice emailed to ${esc(pay.email.to)}`) : step("bad", `The invoice email was not sent: ${esc(pay.email.message)}`));
-    else if (sv.email && who.profile?.email && !S.finished) steps.push(step("wait", `Emailing the invoice to ${esc(who.profile.email)}`));
+      steps.push(step("done", `Invoice ${esc(inv.number ?? "")} created. <a href="${esc(inv.url)}" target="_blank" rel="noopener">View on PayPal</a>`));
+    else if (inv) steps.push(step("bad", `PayPal invoice not created: ${esc(inv.message)}`));
+    else if (sv.provider === "paypal" && !S.finished) steps.push(step("wait", "Creating PayPal invoice"));
+    if (pay.email) steps.push(pay.email.status === "sent" ? step("done", `Invoice emailed to ${esc(pay.email.to)}`) : step("bad", `Invoice email failed: ${esc(pay.email.message)}`));
+    else if (sv.email && who.profile?.email && !S.finished) steps.push(step("wait", `Emailing invoice to ${esc(who.profile.email)}`));
   }
   return `<ol class="door">${steps.join("")}</ol>`;
+}
+
+// One bag as its parts. Each part is put on the page only when it has changed, so a line being confirmed does not
+// redraw the shopper's picture, and a new bag is the only thing that moves when someone walks in.
+function bagParts(cart) {
+  const pid = cart.person;
+  const who = S.meta.people?.[pid] ?? { status: "no_face" };
+  const p = who.profile;
+  const left = cart.state === "left";
+  const picture = p?.has_face ? p.id : who.face;
+  const face = picture
+    ? `<img class="face" style="--c:${colour(pid)}" src="/api/face/${esc(picture)}" alt="" width="44" height="44" />`
+    : `<span class="face none" style="--c:${colour(pid)}" aria-hidden="true">${pid}</span>`;
+  let sub = "";
+  let notice = "";
+  if (p) {
+    const nth = p.visits + (left ? 0 : 1);
+    const sure = who.score ? `. Face match ${Math.round(who.score * 100)}%` : "";
+    sub = `<span class="sub">${esc(p.method || "No payment method on file")}${sure}</span><span class="sub">${nth > 1 ? `${ordinal(nth)} visit` : "First visit"}${p.recent?.length && !left ? `. Last time: ${esc(p.recent.join(", "))}` : ""}</span>`;
+  } else if (who.status === "not_registered") {
+    sub = `<span class="sub">${who.name ? `Resembles ${esc(who.name)}, match too weak` : "Not registered"}</span>`;
+    if (!left)
+      notice = `<p class="notice">${who.name ? `Not sure enough this is ${esc(who.name)}. A clearer view of their face checks them in.` : "This shopper has not registered at the gate."} Nothing will be charged until then. <a href="/gate" target="_blank" rel="noopener">Open the gate</a></p>`;
+  } else sub = `<span class="sub">${left ? "Never recognised" : "Looking for their face"}</span>`;
+  const lines = cart.lines
+    .map((line) => {
+      const [text, kind, story] = lineNote(line);
+      const off = line.state === "in_cart" && line.billable && !line.charge;
+      const cls = line.state !== "in_cart" ? "gone" : line.product && !line.billable && !line.unread ? "own" : off ? "off" : "";
+      const shelf = [line.category, line.section].filter(Boolean).join(", ");
+      return `<li class="${cls}"><span class="name">${esc(line.name)}${shelf ? `<small>${esc(shelf)}</small>` : ""}</span><span class="price">${line.price == null || !line.billable ? "" : line.price.toFixed(2)}</span><span class="note ${kind}"${story ? ` title="${esc(story)}"` : ""}>${kind === "took" ? TICK : ""}<span>${esc(text)}</span></span></li>`;
+    })
+    .join("");
+  const totalLabel = who.status === "not_registered" ? "Not charged" : left ? "Total" : "To pay on the way out";
+  return {
+    head: `${face}<div class="who"><strong>${esc(nameOf(pid))}</strong>${sub}</div><span class="state">${left ? "Left" : "In the shop"}</span>`,
+    notice,
+    lines: lines ? `<ul class="lines">${lines}</ul>` : `<p class="nothing">Nothing picked up.</p>`,
+    total: cart.lines.length ? `<div class="total"><span>${totalLabel}</span><span class="price">${money(cart.total)}</span></div>` : "",
+    door: door(S.meta.payments?.[pid], who, cart),
+  };
 }
 
 function renderCarts() {
@@ -624,125 +860,76 @@ function renderCarts() {
   S.cartsKey = key;
   const box = $("carts");
   if (!S.carts.length) {
-    box.innerHTML = `<p class="empty">Nobody yet. Shoppers appear here with their bag once the gate has let them in.</p>`;
+    box.innerHTML = `<p class="empty">No shoppers in store. Shoppers appear here after entering through the gate.</p>`;
     return;
   }
-  box.innerHTML = S.carts
-    .map((cart) => {
-      const pid = cart.person;
-      const who = S.meta.people?.[pid] ?? { status: "no_face" };
-      const p = who.profile;
-      const left = cart.state === "left";
-      const face = p?.has_face
-        ? `<img class="face" style="--c:${colour(pid)}" src="/api/face/${esc(p.id)}" alt="" width="44" height="44" />`
-        : `<span class="face none" style="--c:${colour(pid)}" aria-hidden="true">${pid}</span>`;
-      let sub = "";
-      let notice = "";
-      if (p) {
-        const nth = p.visits + (left ? 0 : 1);
-        sub = `<span class="sub">${esc(p.method || "No payment method on file")}</span><span class="sub">${nth > 1 ? `${ordinal(nth)} visit` : "First visit"}${p.recent?.length && !left ? `. Last time: ${esc(p.recent.join(", "))}` : ""}</span>`;
-      } else if (who.status === "not_registered") {
-        sub = `<span class="sub">Not registered</span>`;
-        if (!left)
-          notice = `<p class="notice">${who.name ? `Looks like ${esc(who.name)}, who has not come through the gate this time.` : "This shopper has not registered at the gate."} Nothing will be charged to them. <a href="/gate" target="_blank" rel="noopener">Open the gate</a></p>`;
-      } else sub = `<span class="sub">${left ? "Never recognised" : "Looking for their face"}</span>`;
-      const lines = cart.lines
-        .map((line) => {
-          const [text, kind, story] = lineNote(line);
-          const off = line.state === "in_cart" && line.billable && !line.charge;
-          const cls = line.state !== "in_cart" ? "gone" : line.product && !line.billable && !line.unread ? "own" : off ? "off" : "";
-          const shelf = [line.category, line.section].filter(Boolean).join(", ");
-          return `<li class="${cls}"><span class="name">${esc(line.name)}${shelf ? `<small>${esc(shelf)}</small>` : ""}</span><span class="price">${line.price == null || !line.billable ? "" : line.price.toFixed(2)}</span><span class="note ${kind}"${story ? ` title="${esc(story)}"` : ""}>${kind === "took" ? TICK : ""}<span>${esc(text)}</span></span></li>`;
-        })
-        .join("");
-      const totalLabel = who.status === "not_registered" ? "Not charged" : left ? "Total" : "To pay on the way out";
-      return `<article class="bag">
-        <header class="bag-head">${face}<div class="who"><strong>${esc(nameOf(pid))}</strong>${sub}</div><span class="state">${left ? "Left" : "In the shop"}</span></header>
-        ${notice}
-        ${lines ? `<ul class="lines">${lines}</ul>` : `<p class="nothing">Nothing picked up.</p>`}
-        ${cart.lines.length ? `<div class="total"><span>${totalLabel}</span><span class="price">${money(cart.total)}</span></div>` : ""}
-        ${door(S.meta.payments?.[pid], who)}
-      </article>`;
-    })
-    .join("");
+  box.querySelector(":scope > .empty")?.remove();
+  const here = new Map([...box.querySelectorAll(":scope > .bag")].map((el) => [el.dataset.person, el]));
+  for (const cart of S.carts) {
+    const id = String(cart.person);
+    let el = here.get(id);
+    if (!el) {
+      el = document.createElement("article");
+      el.className = "bag new";
+      el.dataset.person = id;
+      el.innerHTML = `<header class="bag-head" data-part="head"></header><div data-part="notice"></div><div data-part="lines"></div><div data-part="total"></div><div data-part="door"></div>`;
+      el.addEventListener("animationend", () => el.classList.remove("new"), { once: true });
+      box.append(el); // bags stay in the order people walked in
+    }
+    here.delete(id);
+    for (const [part, html] of Object.entries(bagParts(cart))) {
+      const slot = el.querySelector(`:scope > [data-part="${part}"]`);
+      if (slot.shown !== html) slot.innerHTML = slot.shown = html;
+    }
+  }
+  for (const el of here.values()) el.remove(); // an outline that turned out to be someone already here
 }
 
 // ---------------------------------------------------------------- events
 
-function describe(e) {
-  const who = esc(nameOf(e.person));
-  const line = S.carts.flatMap((c) => c.lines).find((l) => l.id === e.entry);
-  const item = line?.unread ? `a ${esc(line.name.toLowerCase())} (not yet told which)` : esc(line?.name ?? "an item");
-  const own = line?.product && !line.billable && !line.unread;
-  switch (e.type) {
-    case "enter":
-      return [`${who} walked in`, true];
-    case "reenter":
-      return [`${who} came back`, true];
-    case "checkin":
-      return [`Recognised ${esc(e.name)}${e.score ? ` (${Math.round(e.score * 100)}% face match)` : ""}, let in at the gate. ${e.method ? `${esc(e.method)} is on file` : "No payment method on file"}`, false];
-    case "unregistered":
-      return [e.name ? `${who} looks like ${esc(e.name)}, who has not come through the gate. Nothing will be charged` : `${who} is not registered at the gate. Nothing will be charged`, false];
-    case "audit":
-      if (e.verdict === "kept") return [`Last check: ${who} took ${item} (${esc(e.why)})`, true];
-      if (e.verdict === "put_back") return [`Last check: ${item} was put back, so it is not charged (${esc(e.why)})`, false];
-      return [`Last check could not confirm ${item}, so it is not charged (${esc(e.why)})`, false];
-    case "invoice":
-      return e.status === "created" ? [`PayPal invoice ${esc(e.number ?? "")} written for ${who}`, true] : [`The PayPal invoice for ${who} was not written: ${esc(e.message)}`, false];
-    case "pick":
-      if (own) return [`${who} is holding their own ${item.toLowerCase()}`, true];
-      if (e.origin === "carried_in") return [`${who} arrived holding ${item}`, false];
-      if (e.origin === "inferred") return [`${who} took ${item} (it left the shelf under their hand)`, false];
-      if (e.origin === "seen") return [`${who} is carrying ${item}`, false];
-      return [`${who} took ${item}`, false];
-    case "return":
-      return [`${who} put ${item} back`, false];
-    case "handover":
-      return [`${esc(nameOf(e.from_person))} handed ${item} to ${who}`, false];
-    case "verify":
-      if (e.verdict === "disputed") return [`Second model disagrees on ${item}: ${esc(e.why)}`, false];
-      if (e.verdict === "confirmed") return [`Verified as ${item}: ${esc(e.why)}`, true];
-      return [`Not settled which item this is yet: ${esc(e.why)}`, true];
-    case "exit":
-      return [`${who} walked out`, true];
-    case "payment":
-      if (e.status === "succeeded") return [`Charged ${money(e.amount, e.currency)} to ${who}'s ${esc(e.method || "saved method")}`, false];
-      if (e.status === "nothing_due") return [`${who} had nothing to pay`, true];
-      if (e.status === "dry") return [`Rehearsal: ${who} would be charged ${money(e.amount, e.currency)}`, false];
-      if (e.status === "not_registered") return [`${who} left with ${money(e.amount, e.currency)} of items and is not registered, so nothing was charged`, false];
-      if (e.status === "declined") return [`${who}'s ${esc(e.method || "payment method")} was declined for ${money(e.amount, e.currency)}`, false];
-      if (e.status === "no_card") return [`${who} left with ${money(e.amount, e.currency)} of items and no payment method on file`, false];
-      return [`${who} was not charged: ${esc(e.message)}`, false];
-    case "email":
-      return [e.status === "sent" ? `Invoice emailed to ${esc(e.to)}` : `The invoice email to ${esc(e.to)} was not sent: ${esc(e.message)}`, e.status === "sent"];
-    default:
-      return [esc(e.type), true];
-  }
-}
+const describe = (e) => describeEvent(e, { who: nameOf, line: (id) => S.carts.flatMap((c) => c.lines).find((l) => l.id === id), money });
 
 const RECENT = 8; // the list shows this many until "Show all" is pressed
 
 function renderEvents() {
-  const key = JSON.stringify([S.events, S.carts.map((c) => c.lines.map((l) => l.name)), Object.keys(S.meta.people ?? {}).map((p) => nameOf(p))]);
+  const people = S.carts.map((c) => [String(c.person), nameOf(c.person)]);
+  const key = JSON.stringify([S.events, S.carts.map((c) => c.lines.map((l) => l.name)), people, S.only]);
   if (key === S.eventsKey) return;
   const had = new Set([...$("events").querySelectorAll("li[data-id]")].map((li) => li.dataset.id));
   S.eventsKey = key;
+  // whose activity to list: everyone's, or one shopper's
+  const pick = $("who");
+  const choices = JSON.stringify(people);
+  if (pick.dataset.people !== choices) {
+    pick.dataset.people = choices;
+    pick.innerHTML = `<option value="">Everyone</option>` + people.map(([id, name]) => `<option value="${id}">${esc(name)}</option>`).join("");
+  }
+  if (!people.some(([id]) => id === S.only)) S.only = "";
+  pick.value = S.only;
+  pick.hidden = !people.length;
+  const listed = S.only ? S.events.filter((e) => String(e.person) === S.only || String(e.from_person) === S.only) : S.events;
   const more = $("more-events");
-  more.hidden = S.events.length <= RECENT;
-  more.textContent = $("events").classList.contains("all") ? "Show the latest" : `Show all ${S.events.length}`;
-  if (!S.events.length) {
-    $("events").innerHTML = `<li class="empty">Nothing yet. What shoppers take, put back and pay for is listed here.</li>`;
+  more.hidden = listed.length <= RECENT;
+  more.textContent = $("events").classList.contains("all") ? "Show the latest" : `Show all ${listed.length}`;
+  if (!listed.length) {
+    $("events").innerHTML = `<li class="empty">${S.only ? "Nothing from this shopper yet." : "Nothing yet. What shoppers take, put back and pay for is listed here."}</li>`;
     return;
   }
-  $("events").innerHTML = [...S.events]
+  $("events").innerHTML = [...listed]
     .sort((a, b) => b.id - a.id)
     .map((e, i) => {
       const [text, minor] = describe(e);
       const cls = [had.has(String(e.id)) ? "" : "new", i >= RECENT ? "older" : ""].join(" ").trim();
-      return `<li data-id="${e.id}" class="${cls}"><time>${stamp(e.t)}</time><span class="swatch" style="background:${colour(e.person)}"></span><span class="${minor ? "minor" : ""}">${text}</span></li>`;
+      const at = S.kind === "camera" ? clockTime(S.wall0 + e.t * 1000) : stamp(e.t);
+      return `<li data-id="${e.id}" class="${cls}"><time>${at}</time><span class="swatch" style="background:${colour(e.person)}"></span><span class="${minor ? "minor" : ""}">${text}</span></li>`;
     })
     .join("");
 }
+
+$("who").onchange = () => {
+  S.only = $("who").value;
+  renderEvents();
+};
 
 $("more-events").onclick = () => {
   $("events").classList.toggle("all");
@@ -750,128 +937,11 @@ $("more-events").onclick = () => {
   renderEvents();
 };
 
-// ---------------------------------------------------------------- profiles
-
-async function refreshProfiles() {
-  renderProfiles((await (await fetch("/api/profiles")).json()).profiles);
-}
-
-function renderProfiles(list) {
-  $("profile-count").textContent = list.length ? `Registered shoppers (${list.length})` : "Registered shoppers";
-  $("profile-list").innerHTML = list.length
-    ? list
-        .map(
-          (p) => `<li>${p.has_face ? `<img class="face" src="/api/face/${esc(p.id)}" alt="" width="44" height="44" />` : `<span class="face none" aria-hidden="true">?</span>`}
-            <div class="who"><strong>${esc(p.name)}</strong><span class="sub">${esc(p.method || "No payment method PayPal can charge")}${p.inside ? ". In the shop now" : ""}</span>
-            <span class="sub">${esc(p.email ?? "")}</span>
-            <span class="sub">${p.visits} visit${p.visits === 1 ? "" : "s"}, ${money(p.spent)} spent${p.unpaid ? `, ${money(p.unpaid)} unpaid` : ""}</span></div></li>`,
-        )
-        .join("")
-    : `<li class="empty">Nobody has registered yet. Shoppers register at the gate.</li>`;
-  $("forget").hidden = !list.length;
-}
-
-$("forget").addEventListener("click", async () => {
-  if (!confirm("Delete every shopper: faces, payment links and visit history? This cannot be undone.")) return;
-  await fetch("/api/profiles", { method: "DELETE" });
-  refreshProfiles();
-});
-
-$("open-settings").onclick = () => {
-  refreshProfiles();
-  $("settings").showModal();
-};
-$("close-settings").onclick = () => $("settings").close();
-$("settings").addEventListener("click", (e) => {
-  if (e.target === $("settings")) $("settings").close(); // a click on the backdrop
-});
-
-// ---------------------------------------------------------------- catalogue
-
-function productRow(p = { name: "", prompt: "", price: "", category: "", section: "", author: "" }) {
-  const tr = document.createElement("tr");
-  if (p.id) tr.dataset.id = p.id;
-  const cell = (label, value) => `<td><input type="text" aria-label="${label}" value="${esc(value ?? "")}" /></td>`;
-  // the rest of what is known about it, read-only: format, publisher, what the spine looks like
-  const more = [...Object.values(p.meta ?? {}), p.cues].filter(Boolean).join(", ");
-  tr.innerHTML =
-    `<td><input type="text" aria-label="Name" value="${esc(p.name ?? "")}" />${more ? `<small>${esc(more)}</small>` : ""}</td>` +
-    cell("Author or maker", p.author) + cell("Category", p.category) + cell("Section", p.section) + cell("What the camera looks for", p.prompt) +
-    `<td><input type="number" aria-label="Price" class="num" min="0" step="0.5" value="${esc(p.price)}" /></td><td><button type="button" aria-label="Remove ${esc(p.name || "product")}">×</button></td>`;
-  tr.querySelector("button").onclick = () => {
-    tr.remove();
-    countPrompts();
-  };
-  return tr;
-}
-
-// Rows grouped under "Category › Section" headings, in the order the sections first appear.
-function renderCatalog(catalog) {
-  const rows = [];
-  let last = null;
-  const where = (p) => [p.category, p.section].filter(Boolean).join(", ");
-  const order = [...new Set(catalog.products.map(where))];
-  for (const p of [...catalog.products].sort((a, b) => order.indexOf(where(a)) - order.indexOf(where(b)))) {
-    if (where(p) !== last) {
-      last = where(p);
-      const n = catalog.products.filter((x) => where(x) === last).length;
-      const head = document.createElement("tr");
-      head.className = "group";
-      head.innerHTML = `<th colspan="7" scope="colgroup">${esc(last || "No category")} <span>${n} product${n === 1 ? "" : "s"}</span></th>`;
-      rows.push(head);
-    }
-    rows.push(productRow(p));
-  }
-  $("products").replaceChildren(...rows);
-  $("catalog-title").textContent = `Catalogue: ${S.config?.shops.find((x) => x.id === S.config.shop)?.name ?? catalog.name}`;
-  $("belongings").value = catalog.belongings.join(", ");
-  countPrompts();
-}
-
-function readCatalog() {
-  const products = [...$("products").querySelectorAll("tr:not(.group)")]
-    .map((tr, i) => {
-      const [name, author, category, section, prompt, price] = [...tr.querySelectorAll("input")].map((el) => el.value.trim());
-      const old = S.config.catalog.products.find((p) => p.id === tr.dataset.id) ?? {};
-      // with no phrase given, the camera looks for the product by its name
-      return { ...old, id: tr.dataset.id || `p${Date.now().toString(36)}${i}`, name: name || prompt, author, category, section, prompt: prompt || name.toLowerCase(), price: Number(price) || 0 };
-    })
-    .filter((p) => p.prompt);
-  const belongings = $("belongings").value.split(",").map((s) => s.trim()).filter(Boolean);
-  return { ...S.config.catalog, products, belongings };
-}
-
-function countPrompts() {
-  const c = readCatalog();
-  const n = 3 + new Set(c.products.map((p) => p.prompt.toLowerCase())).size + c.belongings.length;
-  $("prompt-count").textContent =
-    n <= S.config.max_prompts
-      ? `${n} phrases a frame (person, hand and "item held in hand" are always asked). Products that share a phrase, like books, are told apart by reading them.`
-      : `${n} phrases a frame. More than ${S.config.max_prompts} need a second request for every frame, which halves the frame rate.`;
-}
-
-// A new product starts at the top of the list, where it can be seen and typed into straight away.
-$("add-product").onclick = () => {
-  const row = productRow();
-  $("products").prepend(row);
-  row.querySelector("input").focus();
-  $("catalog-note").textContent = "Fill in the new product, then save the catalogue.";
-};
-$("catalog").addEventListener("input", countPrompts);
-$("save-catalog").onclick = async () => {
-  const r = await fetch(`/api/catalog/${encodeURIComponent(S.config.shop)}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(readCatalog()) });
-  const body = await r.json();
-  if (r.ok) {
-    S.config.catalog = body.catalog;
-    renderCatalog(body.catalog); // regroup under the headings
-  }
-  $("catalog-note").textContent = r.ok ? "Saved. It applies the next time you press Start." : body.error;
-};
-
 // ---------------------------------------------------------------- controls
 
 $("start").onclick = () => (S.running && !S.ended ? end() : start());
 $("shop").onchange = async () => {
+  rememberShop($("shop").value);
   if (S.running && !S.ended) end();
   await loadShop($("shop").value);
 };

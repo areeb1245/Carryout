@@ -5,7 +5,8 @@ Registration saves a payment method in PayPal's vault: a setup token for a card 
 payment token (`usage_type: MERCHANT`) once it is approved. A card is approved at once; a PayPal account is approved
 by its owner in a PayPal window. Walking out creates one Orders v2 payment against that token with the shopper not
 present, and `PayPal-Request-Id` makes a retry of the same walk-out charge once, not twice. After the charge an
-invoice is written with the Invoicing API and marked as paid, so the shopper has a PayPal page to open.
+invoice is written with the Invoicing API and marked as paid, so the shopper has a PayPal page to open. A charge that
+turns out to be wrong is given back with `refund`: all of it, or the price of one line.
 
 Only the sandbox is ever called: the host is fixed below, and `PAYPAL_ENV` must say `sandbox` or payments stay off.
 The Stripe version of this file (same `save_card` and `charge`) is kept on the `stripe` branch.
@@ -193,6 +194,31 @@ class Payments:
         if capture.get("status") == "DECLINED":
             return {**base, "status": "declined", "id": capture.get("id"), "order": order.get("id"), "message": "The payment method was declined."}
         return {**base, "status": "failed", "id": capture.get("id"), "order": order.get("id"), "message": f"PayPal left the payment as {capture.get('status') or order.get('status')}"}
+
+    # ------------------------------------------------------------------ giving money back
+
+    async def refund(self, capture_id: str, amount: float, currency: str, key: str, note: str = "") -> dict:
+        """Give back `amount` of a captured payment, to the method that paid. `key` makes a retry refund once, not
+        twice. Returns {status: refunded | pending | failed, id, amount, currency, message}."""
+        currency = currency.upper()
+        base = {"amount": round(amount, 2), "currency": currency.lower(), "id": None}
+        if amount <= 0 or not capture_id:
+            return {**base, "status": "failed", "message": "Nothing to refund."}
+        body = {"amount": money(amount, currency)}
+        if note:
+            body["note_to_payer"] = note[:255]
+        try:
+            made = await self._call("POST", f"/v2/payments/captures/{capture_id}/refund", body, key=key)
+        except PayPalError as e:
+            return {**base, "status": "failed", "message": f"{e.issue}: {e}"[:200]}
+        except (httpx.HTTPError, PaymentsOff) as e:
+            return {**base, "status": "failed", "message": str(e) or type(e).__name__}
+        state = made.get("status")
+        if state == "COMPLETED":
+            return {**base, "status": "refunded", "id": made.get("id"), "message": ""}
+        if state == "PENDING":
+            return {**base, "status": "pending", "id": made.get("id"), "message": "PayPal is still processing the refund."}
+        return {**base, "status": "failed", "id": made.get("id"), "message": f"PayPal left the refund as {state}"}
 
     # ------------------------------------------------------------------ the invoice
 

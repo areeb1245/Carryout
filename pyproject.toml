@@ -12,6 +12,7 @@ dependencies = [
     "scipy>=1.11",
     "rapidocr-onnxruntime>=1.4.4",
     "psycopg[binary]>=3.2",
+    "pyjwt>=2.8",
 ]
 
 [dependency-groups]

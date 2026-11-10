@@ -14,6 +14,7 @@ call, and so everything still works when `DATABASE_URL` is not set.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -23,7 +24,8 @@ from .sam_client import load_env
 
 log = logging.getLogger("checkout")
 DIMS = 128
-TABLE = "checkout_faces"
+TABLE = "checkout_faces"  # the default; `FACE_TABLE` gives each copy of the app (this computer, Render) its own
+TABLE_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,40}$")
 
 
 def literal(signature: np.ndarray) -> str:
@@ -35,6 +37,11 @@ class FaceIndex:
     def __init__(self, env: dict | None = None, url: str | None = None):
         env = load_env() if env is None else env
         self.url = url if url is not None else env.get("DATABASE_URL", "")
+        # Two copies of the app must not share a table: each makes the table match its own database on start, and
+        # "delete all shoppers" empties it, so one copy would wipe the other's faces.
+        self.table = env.get("FACE_TABLE", "").strip() or TABLE
+        if not TABLE_NAME.match(self.table):
+            raise ValueError("FACE_TABLE must be lower-case letters, digits and underscores")
         self.enabled, self.problem = bool(self.url), "" if self.url else "DATABASE_URL is not set in .env; faces are matched from the local copy"
         self.conn = None
         self.lock = threading.Lock()
@@ -72,10 +79,10 @@ class FaceIndex:
     def _setup(self, conn) -> None:
         conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
         conn.execute(
-            f"CREATE TABLE IF NOT EXISTS {TABLE} (id BIGSERIAL PRIMARY KEY, profile TEXT NOT NULL, local_id BIGINT NOT NULL, "
+            f"CREATE TABLE IF NOT EXISTS {self.table} (id BIGSERIAL PRIMARY KEY, profile TEXT NOT NULL, local_id BIGINT NOT NULL, "
             f"embedding vector({DIMS}) NOT NULL, created TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE (profile, local_id))"
         )
-        conn.execute(f"CREATE INDEX IF NOT EXISTS {TABLE}_embedding ON {TABLE} USING hnsw (embedding vector_cosine_ops)")
+        conn.execute(f"CREATE INDEX IF NOT EXISTS {self.table}_embedding ON {self.table} USING hnsw (embedding vector_cosine_ops)")
 
     def close(self) -> None:
         self.writer.shutdown(wait=True)
@@ -86,7 +93,7 @@ class FaceIndex:
     # ------------------------------------------------------------------ writing
 
     def add(self, profile: str, local_id: int, signature: np.ndarray) -> None:
-        self._run(lambda c: c.execute(f"INSERT INTO {TABLE} (profile, local_id, embedding) VALUES (%s, %s, %s::vector) ON CONFLICT (profile, local_id) DO NOTHING", (profile, local_id, literal(signature))))
+        self._run(lambda c: c.execute(f"INSERT INTO {self.table} (profile, local_id, embedding) VALUES (%s, %s, %s::vector) ON CONFLICT (profile, local_id) DO NOTHING", (profile, local_id, literal(signature))))
 
     def add_later(self, profile: str, local_id: int, signature: np.ndarray) -> None:
         """From the frame loop: store it without waiting for the database."""
@@ -105,18 +112,18 @@ class FaceIndex:
         """Make the table hold exactly the local embeddings, given as (local id, profile, embedding)."""
 
         def work(conn) -> dict:
-            there = {(p, i) for p, i in conn.execute(f"SELECT profile, local_id FROM {TABLE}")}
+            there = {(p, i) for p, i in conn.execute(f"SELECT profile, local_id FROM {self.table}")}
             here = {(profile, local_id): signature for local_id, profile, signature in rows}
             for (profile, local_id) in there - set(here):
-                conn.execute(f"DELETE FROM {TABLE} WHERE profile = %s AND local_id = %s", (profile, local_id))
+                conn.execute(f"DELETE FROM {self.table} WHERE profile = %s AND local_id = %s", (profile, local_id))
             for (profile, local_id) in set(here) - there:
-                conn.execute(f"INSERT INTO {TABLE} (profile, local_id, embedding) VALUES (%s, %s, %s::vector) ON CONFLICT DO NOTHING", (profile, local_id, literal(here[(profile, local_id)])))
+                conn.execute(f"INSERT INTO {self.table} (profile, local_id, embedding) VALUES (%s, %s, %s::vector) ON CONFLICT DO NOTHING", (profile, local_id, literal(here[(profile, local_id)])))
             return {"added": len(set(here) - there), "removed": len(there - set(here)), "total": len(here)}
 
         return self._run(work)
 
     def forget_all(self) -> None:
-        self._run(lambda c: c.execute(f"TRUNCATE {TABLE}"))
+        self._run(lambda c: c.execute(f"TRUNCATE {self.table}"))
 
     # ------------------------------------------------------------------ searching
 
@@ -125,10 +132,10 @@ class FaceIndex:
         A profile keeps several views of a face; its score is that of its best view."""
         face = literal(signature)
         sql = (
-            f"SELECT profile, MAX(1 - distance) AS score FROM (SELECT profile, embedding <=> %s::vector AS distance FROM {TABLE} "
+            f"SELECT profile, MAX(1 - distance) AS score FROM (SELECT profile, embedding <=> %s::vector AS distance FROM {self.table} "
             f"ORDER BY embedding <=> %s::vector LIMIT %s) nearest GROUP BY profile ORDER BY score DESC"
         )
         return [(profile, float(score)) for profile, score in self._run(lambda c: c.execute(sql, (face, face, nearest)).fetchall())]
 
     def count(self) -> int:
-        return self._run(lambda c: c.execute(f"SELECT COUNT(*) FROM {TABLE}").fetchone()[0])
+        return self._run(lambda c: c.execute(f"SELECT COUNT(*) FROM {self.table}").fetchone()[0])

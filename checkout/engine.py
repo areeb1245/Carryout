@@ -136,6 +136,7 @@ class Item:
     read_how: str = ""  # the evidence for `settled`, in words
     read_in_hand: bool = False  # `settled` comes from reading the item in the hand, not from its shelf spot
     read_sure: bool = False  # `settled` rests on text read clearly, not on the second model's word alone
+    likeness: dict | None = None  # how alike it looks to the catalogue's pictures: {product, score}
 
     @property
     def seen_as(self) -> str | None:
@@ -179,6 +180,7 @@ class Entry:
     paid: str | None = None  # id of the payment that covered this line
     audit: str | None = None  # the check before charging: kept | put_back | unclear, None if it has not run
     audit_why: str = ""
+    likeness: dict | None = None  # the best likeness to a catalogue picture: {product, name, score, why}
 
 
 class Engine:
@@ -395,11 +397,17 @@ class Engine:
                 return False
             return not any(iou(d, p) > 0.5 for p in present) and not any(iou(d, hand) > 0.5 for hand in self.hands)
 
-        # catalogue detections; where two products claim one object, both votes are kept on the better mask
+        # Catalogue detections; where two products claim one object, both votes are kept on the better mask.
+        # A phrase that outlines its own product clearly often outlines the item beside it too, faintly: in one
+        # shopper's two hands a power bank's phrase scored 0.84 on the power bank and 0.36 on the tissue pack, whose
+        # own phrase scored 0.30. So a vote counts for less the weaker it is than that phrase's best in the frame.
+        # Two of the same product score alike and keep their votes; an item no other phrase claims keeps its name.
         named: list[Det] = []
         for prompt, product in self.catalog.by_prompt.items():
-            for d in nms(drop_groups([d for d in by_label.get(prompt, []) if usable(d, cfg.item_weak_score)])):
-                d.extra["votes"] = {product.id: d.score}
+            found = nms(drop_groups([d for d in by_label.get(prompt, []) if usable(d, cfg.item_weak_score)]))
+            top = max((d.score for d in found), default=1.0)
+            for d in found:
+                d.extra["votes"] = {product.id: d.score * min(1.0, d.score / top)}
                 named.append(d)
         merged: list[Det] = []
         for d in sorted(named, key=lambda d: -d.score):
@@ -741,8 +749,9 @@ class Engine:
 
     def _return(self, item: Item, how: str, confidence: float) -> None:
         entry = item.entry
-        entry.state, entry.returned_t = "returned", self.t
-        self._emit("return", person=entry.person, entry=entry.id, item=item.id, how=how, confidence=confidence)
+        if not entry.paid:  # a line settled at an earlier walk-out stays as it was charged: undoing that is a refund
+            entry.state, entry.returned_t = "returned", self.t
+            self._emit("return", person=entry.person, entry=entry.id, item=item.id, how=how, confidence=confidence)
         item.entry, item.holder = None, None
         if item.visible:
             item.state, item.anchor, item.rest_t, item.move_run = REST, item.c.copy(), self.t, 0
@@ -764,9 +773,66 @@ class Engine:
             for item in self.items.values():
                 if item.state == HELD_STATE and item.holder == e["person"]:
                     item.state = GONE  # it left with the shopper; the cart line stays
-            self._emit("exit", person=e["person"], total=self._cart(e["person"])["total"])
+            # how: "out_of_view" (unseen for exit_after_s) or "ended" (the footage stopped with them still inside)
+            self._emit("exit", person=e["person"], total=self._cart(e["person"])["total"], how=e.get("how", "out_of_view"), after_s=self.cfg.exit_after_s)
         else:
             self._emit(e["type"], person=e["person"])
+
+    def same_person(self, new: int, old: int) -> bool:
+        """Their face says the person tracked as `new` is the shopper tracked before as `old`, whose outline was
+        lost for a while (they turned, were hidden, or stepped out long enough to count as having left). `new` is
+        folded into `old`: one shopper, one bag.
+
+        Nothing they carried through the gap may be billed twice. So a line of `new` for something first seen
+        already in the hand (not seen leaving a shelf) joins the line `old` has for that kind of item, paid or
+        not, instead of standing beside it. What was seen leaving a shelf after the gap is a new line."""
+        people = self.people.people
+        a, b = people.get(old), people.get(new)
+        if a is None or b is None or a is b or (a.seen and a.state == ppl.ACTIVE):
+            return False
+        a.mask, a.box, a.area, a.c, a.polygons, a.score = b.mask, b.box, b.area, b.c, b.polygons, b.score
+        a.hist = b.hist if b.hist is not None else a.hist
+        a.last_t, a.seen, a.hits, a.state, a.exit_t = b.last_t, b.seen, a.hits + b.hits, ppl.ACTIVE, None
+        del people[new]
+        for item in self.items.values():
+            if item.holder == new:
+                item.holder = old
+            if new in item.contact:
+                item.contact[old] = item.contact.get(old, 0.0) + item.contact.pop(new)
+            if item.other_run and item.other_run[0] == new:
+                item.other_run = (old, *item.other_run[1:])
+        had = [e for e in self.entries if e.person == old and e.state == "in_cart"]
+        for entry in self.entries:
+            if entry.person != new:
+                continue
+            entry.person = old
+            if entry.state != "in_cart" or entry.origin not in ("hand", "carried_in", "seen"):
+                continue
+            item = entry.item
+            twin = next((e for e in had if e.item is not item and not (e.item.visible and e.item.state == HELD_STATE) and self.catalog.same_kind(e.item.cls, item.cls)), None)
+            if twin is None:
+                continue
+            had.remove(twin)
+            entry.state = "merged"
+            self._emit("void", person=old, entry=entry.id, into=twin.id)
+            if twin.item.settled and not self.catalog.same_kind(item.settled, twin.item.settled):
+                item.settled = None
+            if twin.item.settled and not item.settled:
+                item.settled, item.read_how, item.read_in_hand, item.read_sure = twin.item.settled, twin.item.read_how, twin.item.read_in_hand, twin.item.read_sure
+            twin.item.state, twin.item.entry = GONE, None
+            twin.item, item.entry = item, twin  # the outline in view carries the line they already had
+        for hand in self.hands:
+            if hand.extra.get("person") == new:
+                hand.extra["person"] = old
+        for event in self.events:  # what happened to `new` happened to this shopper
+            if event.get("person") == new:
+                event["person"] = old
+                if event["type"] == "enter":
+                    event["type"] = "reenter"
+            if event.get("from_person") == new:
+                event["from_person"] = old
+        self._emit("same", person=old, was=new)
+        return True
 
     def note(self, kind: str, **data) -> None:
         """Add an event from outside the frame loop (check-in, second look, payment) to the same timeline."""
@@ -791,7 +857,10 @@ class Engine:
             # which member of a family it is rests on reading it: no confirmed reading, no bill. And one bill per
             # title per shopper: a second line with the same title is the same item seen under another track.
             return entry.verified == "confirmed" and not self._repeat(entry)
-        return entry.verified == "confirmed" or self._confidence(entry) >= self.cfg.charge_min_confidence
+        if entry.verified == "confirmed":
+            return True
+        # not confirmed: SAM's phrase alone may name it, unless a look in the hand named another product
+        return self._confidence(entry) >= self.cfg.charge_min_confidence and not self._contested(entry)
 
     def _repeat(self, entry: Entry) -> bool:
         """Is there an earlier line in this shopper's cart for the very same family product?"""
@@ -828,6 +897,9 @@ class Engine:
             "picked_t": round(entry.picked_t, 2),
             "returned_t": None if entry.returned_t is None else round(entry.returned_t, 2),
             "in_view": entry.item.visible and entry.item.state == HELD_STATE and entry.state == "in_cart",
+            "likeness": entry.likeness,
+            # held back because a look in the hand named this other product (the name of it), else ""
+            "contested": self.catalog.by_id[other].name if entry.verified != "confirmed" and (other := self._contested(entry)) in self.catalog.by_id else "",
         }
 
     def _cart(self, pid: int) -> dict:
@@ -889,7 +961,20 @@ class Engine:
             item.entry.why = item.read_how  # shown on the line; billing still waits for a reading in the hand
         return True
 
-    def name_held(self, item_id: int, product_id: str, why: str) -> None:
+    def _renamable(self, seen_as: str | None, product_id: str) -> bool:
+        """May the looks give an item another product than SAM's phrase said? For products outside a family (and
+        shoppers' own things), yes: each has its own phrase, and a phrase can outline the item next to its product.
+        Not into or out of a family (books): which title it is rests on reading it."""
+        product = self.catalog.by_id.get(product_id)
+        return product is not None and not product.head and product.family is None and self.catalog.family_of(seen_as) is None
+
+    def _contested(self, entry: Entry) -> str | None:
+        """The other product a look at it in the hand named, if one named another product than the one this line
+        would be billed as."""
+        cls = entry.item.cls
+        return next((p for h, p, _, only in entry.looks if h and p and p != cls and not only), None)
+
+    def name_held(self, item_id: int, product_id: str, why: str, overrule: bool = False) -> None:
         """A held item was clearly identified in the hand (its text read, or the second model's looks agreeing).
 
         Tracking a small item in a moving hand is the least reliable part of all this: a track can jump from one book
@@ -909,8 +994,8 @@ class Engine:
         product = self.catalog.by_id.get(product_id)
         if item is None or item.state != HELD_STATE or item.entry is None or product is None or product.head:
             return
-        if not self.catalog.same_kind(item.seen_as, product_id):
-            return
+        if not overrule and not self.catalog.same_kind(item.seen_as, product_id):
+            return  # `overrule`: the looks agree it is another product than SAM's phrase said (apply_look)
         entry, pid = item.entry, item.entry.person
         if entry.paid:
             return
@@ -1007,10 +1092,17 @@ class Engine:
         """Is this title on the shopper's cart right now?"""
         return any(e.person == pid and e.state == "in_cart" and e.item.settled == product_id for e in self.entries)
 
+    def awaiting(self, pid: int, product_id: str) -> bool:
+        """Does this shopper have a line that already carries this title, from the shelf or from an earlier
+        reading, and only waits for it to be read in their hands?"""
+        return any(e.person == pid and e.state == "in_cart" and not e.paid and e.verified is None and e.item.settled == product_id for e in self.entries)
+
     def drop_title(self, pid: int, product_id: str, how: str) -> bool:
         """The shopper is no longer carrying this title (it has stopped showing up in their hands): off the cart."""
         for entry in self.entries:
             if entry.person == pid and entry.state == "in_cart" and not entry.paid and entry.item.settled == product_id:
+                if entry.item.visible and entry.item.state == HELD_STATE:
+                    return False  # its outline is in their hand right now: turned away or covered, not put down
                 self._return(entry.item, how, 0.7)
                 return True
         return False
@@ -1037,7 +1129,7 @@ class Engine:
         """How many of a shopper's picks have no confirmed title yet."""
         return sum(1 for e in self.entries if e.person == pid and e.state == "in_cart" and not e.paid and e.verified is None and self.catalog.family_of(e.item.seen_as))
 
-    def apply_look(self, entry_id: int, holding: bool, product_id: str | None, why: str = "", weight: int = 1) -> None:
+    def apply_look(self, entry_id: int, holding: bool, product_id: str | None, why: str = "", weight: int = 1, names_only: bool = False) -> None:
         """A second model looked at one frame of a held item. One look can be wrong (an item seen edge-on, a hand
         in the way), so the verdict comes from the looks together:
 
@@ -1047,14 +1139,19 @@ class Engine:
         (unsettled) the looks and SAM disagree: SAM's label and the confidence rule stand until more looks come in
 
         A look counts double (`weight` 2) when the text read off the item by the local OCR points to the same product.
+        A look that only says which product the item looks like (`names_only`: the likeness to the catalogue's pictures)
+        helps name it, but is not counted for or against it being held: whether the item left the shelf is for the
+        looks at the shopper's hands to say.
         """
         entry = next((e for e in self.entries if e.id == entry_id), None)
         if entry is None or entry.state != "in_cart" or entry.paid:
             return
         item = entry.item
         named = self.catalog.by_id.get(product_id)
-        entry.looks.append((holding, product_id if named and not named.head else None, weight))
-        held = [(p, w) for h, p, w in entry.looks if h]
+        entry.looks.append((holding, product_id if named and not named.head else None, weight, names_only))
+        held = [(p, w) for h, p, w, _ in entry.looks if h]
+        held_looks = sum(1 for h, _, _, only in entry.looks if h and not only)
+        not_held = sum(1 for h, _, _, only in entry.looks if not h and not only)
         tally: dict[str, int] = {}
         for p, w in held:
             if p:
@@ -1066,7 +1163,15 @@ class Engine:
             winner = tops[0]
         elif tops and item.seen_as in tops:
             winner = item.seen_as
-        if len(entry.looks) - len(held) > len(held):
+        if winner and not self.catalog.same_kind(item.seen_as, winner):
+            # Another product than SAM's phrase says. SAM's phrases can outline the item beside the right one, so
+            # the looks may overrule them, but only on the second model's own word plus one more (a second look, or
+            # the likeness to the pictures): the pictures are compared with billable products only, so on their own
+            # they would turn a shopper's phone into the power bank it resembles. Books keep their own rules.
+            looked = any(h and p == winner and not only for h, p, _, only in entry.looks)
+            if not looked or not self._renamable(item.seen_as, winner):
+                winner = None
+        if not_held > held_looks:
             verdict = "disputed"
         elif winner:
             verdict = "confirmed"
@@ -1076,7 +1181,7 @@ class Engine:
             verdict = None
         if verdict == "confirmed":
             if item.state == HELD_STATE and item.entry is entry:
-                self.name_held(item.id, winner, why)
+                self.name_held(item.id, winner, why, overrule=self._renamable(item.seen_as, winner))
             elif (entry.verified, item.settled) != ("confirmed", winner):
                 # the item is out of sight by now (its shopper has left, say), so only the cart line can change
                 twin = next((e for e in self.entries if e is not entry and e.person == entry.person and e.state == "in_cart" and e.item.settled == winner), None)
@@ -1092,6 +1197,18 @@ class Engine:
         if verdict != entry.verified:
             entry.verified, entry.why = verdict, why[:160]
             self._emit("verify", person=entry.person, entry=entry.id, item=item.id, verdict=verdict or "unsettled", why=entry.why, looks=len(entry.looks))
+
+    def note_likeness(self, entry_id: int, product_id: str, score: float, why: str) -> None:
+        """How alike a picked item looks to its nearest catalogue picture (likeness.py). Kept on the line and the
+        item for the page and the ledger; the vote it may carry goes through apply_look like any other look."""
+        entry = next((e for e in self.entries if e.id == entry_id), None)
+        product = self.catalog.by_id.get(product_id)
+        if entry is None or product is None:
+            return
+        best = entry.likeness
+        if best is None or score > best["score"]:
+            entry.likeness = {"product": product_id, "name": product.name, "score": round(score, 3), "why": why}
+            entry.item.likeness = {"product": product_id, "name": product.name, "score": round(score, 3)}
 
     def apply_audit(self, entry_id: int, verdict: str, why: str = "") -> None:
         """The check before charging has looked at a line: kept (charge it), put_back or unclear (do not)."""
@@ -1114,7 +1231,7 @@ class Engine:
         for person in self.people.people.values():
             if person.state in (ppl.ACTIVE, ppl.LOST):
                 person.state, person.exit_t = ppl.EXITED, self.t
-                self._person_event({"type": "exit", "person": person.id})
+                self._person_event({"type": "exit", "person": person.id, "how": "ended"})
         return [e["person"] for e in self.events[first:] if e["type"] == "exit"]
 
     def carts(self) -> list[dict]:
@@ -1146,6 +1263,7 @@ class Engine:
                     "box": _nbox(item.box, self.size),
                     "polygons": item.polygons,
                     "score": round(item.score, 2),
+                    "likeness": item.likeness,
                 }
             )
         return {"t": round(self.t, 3), "people": people, "hands": hands, "items": items, "events": new_events or [], "carts": self.carts()}

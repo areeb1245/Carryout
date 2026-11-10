@@ -24,7 +24,7 @@ import uuid
 import cv2
 import numpy as np
 
-from .identity import Face, Profile, Profiles
+from .identity import SURE, Face, Profile, Profiles
 from .mailer import valid_email
 
 TTL_S = 600
@@ -53,24 +53,30 @@ class Gate:
         if not faces:
             return {"status": "no_face"}
         row = max(faces, key=lambda f: f[0][2])[0]  # the nearest person is the one at the gate
-        answer = await self.see(self.faces.read(frame, row))
         h, w = frame.shape[:2]
+        k = min(1.0, 720 / max(h, w))  # what the camera saw, kept small: it goes on the visit if they are let in
+        shot = cv2.imencode(".jpg", cv2.resize(frame, (round(w * k), round(h * k)), interpolation=cv2.INTER_AREA) if k < 1 else frame, [cv2.IMWRITE_JPEG_QUALITY, 82])[1].tobytes()
+        answer = await self.see(self.faces.read(frame, row), shot)
         # where the face is, so the screen can show the shopper that it is them the gate is looking at
         answer["box"] = [round(float(v), 4) for v in (row[0] / w, row[1] / h, (row[0] + row[2]) / w, (row[1] + row[3]) / h)]
         return answer
 
-    async def see(self, face: Face | None) -> dict:
-        """What the gate says to the face in front of it."""
+    async def see(self, face: Face | None, shot: bytes | None = None) -> dict:
+        """What the gate says to the face in front of it. `shot` is the camera picture the face was found in."""
         self._sweep()
         if face is None:
             return {"status": "no_face"}
         match = await asyncio.to_thread(self.faces.find, face)  # the vector search waits on the database
         if match:
-            profile = match[0]
-            return {"status": "known", "pass": self._pass(profile), "ready": self.faces.can_pay(profile), "profile": self.faces.summary(profile)}
+            profile, score = match
+            token = self._pass(profile)
+            self.passes[token].update(shot=shot, score=round(float(score), 2))
+            return {"status": "known", "pass": token, "ready": self.faces.can_pay(profile), "profile": self.faces.summary(profile), "score": round(float(score), 2)}
         if face.quality < MIN_QUALITY:
             return {"status": "closer"}
         ticket = self._ticket(face)
+        if shot and self.tickets[ticket]["face"] is face:
+            self.tickets[ticket]["shot"] = shot  # the picture their best view so far came from
         thumb = "data:image/jpeg;base64," + base64.b64encode(self.tickets[ticket]["face"].thumb).decode()
         return {"status": "new", "ticket": ticket, "face": thumb}
 
@@ -118,8 +124,9 @@ class Gate:
             return {"status": "error", "message": "Please look at the camera again."}
         if not self.faces.can_pay(profile):
             return {"status": "needs_method", "profile": self.faces.summary(profile)}
-        self.faces.admit(profile)
-        return {"status": "admitted", "profile": self.faces.summary(profile)}
+        held = self.passes.get(token or "", {})
+        self.faces.admit(profile, held.get("shot"), held.get("score"))
+        return {"status": "admitted", "profile": self.faces.summary(profile), "score": held.get("score")}
 
     async def register(self, ticket: str | None = None, token: str | None = None, name: str = "", email: str = "", method: str = "paypal", test_card: str = "", card: dict | None = None, return_base: str = "") -> dict:
         """A new face (`ticket`) becomes a profile, or a known one (`token`) gets a payment method, and is let in.
@@ -130,7 +137,9 @@ class Gate:
         if known is None and held is None:
             return {"status": "error", "message": "Please look at the camera again."}
         if known is None:
-            again = self.faces.who(held["face"])  # registered a moment ago, or recognised now from a better picture
+            # registered a moment ago, or recognised now from a better picture. Only a sure match: someone who
+            # merely looks like a registered shopper must get a profile of their own, not that shopper's.
+            again = self.faces.who(held["face"], floor=SURE)
             if again:
                 known = again[0]
         name, email = name.strip(), email.strip()
@@ -143,7 +152,8 @@ class Gate:
         if pay is None or not pay.enabled:
             return {"status": "error", "message": pay.problem if pay else "Payments are not set up."}
         ref = known.id if known else (ticket or uuid.uuid4().hex)[:10]
-        details = {"profile": known.id if known else None, "face": None if known else held["face"], "ticket": ticket, "name": name, "email": email}
+        seen = held if held else self.passes.get(token or "", {})
+        details = {"profile": known.id if known else None, "face": None if known else held["face"], "ticket": ticket, "name": name, "email": email, "shot": seen.get("shot"), "score": seen.get("score")}
         try:
             if method == "card":
                 saved = await pay.save_card(name or known.name, test_card, f"{ref}-{uuid.uuid4().hex[:6]}", email or None, details=card or None)
@@ -193,7 +203,7 @@ class Gate:
             profile.email = details["email"]
             book.db.execute("UPDATE profiles SET email = ? WHERE id = ?", (profile.email, profile.id))
         book.set_card(profile, saved.customer, saved.payment_method, saved.brand, saved.last4, getattr(saved, "payer", ""))
-        book.admit(profile)
+        book.admit(profile, details.get("shot"), details.get("score"))
         return {"status": "admitted", "new": details.get("profile") is None, "profile": book.summary(profile)}
 
     @staticmethod

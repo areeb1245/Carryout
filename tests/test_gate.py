@@ -5,6 +5,7 @@ are billed on the shop floor.
 Faces here are made-up embeddings compared with numpy, and the payment provider is a stand-in, so no model file,
 camera or network is needed.
 """
+import time
 import asyncio
 
 import numpy as np
@@ -217,40 +218,89 @@ def test_the_gate_searches_the_vector_index_when_there_is_one(tmp_path):
     run(scenario())
 
 
-# ---------------------------------------------------------------- the shop floor only bills open visits
+# ---------------------------------------------------------------- who the shop floor bills
 
 
-def test_only_people_the_gate_let_in_are_billed(tmp_path):
+def lookalike(of: Face, seed: int, score: float = 0.4) -> Face:
+    """A face that scores `score` against `of`: like that person, but not sure enough (between MATCH and SURE)."""
+    rest = np.random.default_rng(seed).normal(size=of.signature.shape).astype(np.float32)
+    rest -= (rest.ravel() @ of.signature.ravel()) * of.signature
+    rest /= np.linalg.norm(rest)
+    return Face((score * of.signature + np.sqrt(1 - score**2) * rest).astype(np.float32), 120.0, b"\xff\xd8jpeg")
+
+
+def in_view(shop, faces: dict[int, Face]) -> None:
+    """Put each face on the head of the shopper at that place, left to right."""
+    state = shop.engine.snapshot()
+    ids = shop.ids()
+    centre = {p["id"]: ((p["box"][0] + p["box"][2]) / 2, p["box"][1] + 0.05) for p in state["people"]}
+    shop.book.scene = [(f, *centre[ids[i]]) for i, f in faces.items()]
+
+
+def look(shop, times: int = 2) -> None:
+    state = shop.engine.snapshot()
+    for _ in range(times):
+        shop.session._faces(None, state)
+
+
+def registered(book, name: str, seed: int, customer: str):
+    profile = book.add(name, face(seed), f"{name.split()[0].lower()}@example.com")
+    book.set_card(profile, customer, f"tok_{customer}", "visa", "1881")
+    return profile
+
+
+def test_registered_shoppers_are_billed_with_or_without_the_gate(tmp_path):
     async def scenario():
         shop = Shop(tmp_path, book=Book(tmp_path / "checkout.db"))
         ids = play(shop)  # shoppers 0, 2 and 4 are holding an item each
         book, session = shop.book, shop.session
-        admitted = book.add("Admitted", face(10), "in@example.com")
-        book.set_card(admitted, "cust_a", "tok_a", "visa", "1881")
+        admitted = registered(book, "Admitted", 10, "cust_a")
         book.admit(admitted)
-        stayed_out = book.add("Stayed Out", face(11), "out@example.com")  # has a method, did not come through the gate
-        book.set_card(stayed_out, "cust_o", "tok_o", "visa", "1881")
+        skipped = registered(book, "Skipped Gate", 11, "cust_s")  # has a method, did not come through the gate
+        in_view(shop, {0: face(10), 2: face(11), 4: face(12)})
+        look(shop)
 
-        state = shop.engine.snapshot()
-        centre = {p["id"]: ((p["box"][0] + p["box"][2]) / 2, p["box"][1] + 0.05) for p in state["people"]}
-        book.scene = [(face(10), *centre[ids[0]]), (face(11), *centre[ids[2]]), (face(12), *centre[ids[4]])]
-        for _ in range(2):
-            session._faces(None, state)
-
-        assert session.who == {ids[0]: admitted}
-        assert session.strangers == {ids[2]: "Stayed Out", ids[4]: ""}
+        # the one who skipped the gate is still who they are, and is checked in on the floor; a face nobody knows is not
+        assert session.who == {ids[0]: admitted, ids[2]: skipped} and session.walk_ins == {ids[2]}
+        assert session.strangers == {ids[4]: ""}
+        assert book.open_visit(skipped) is not None  # the floor opened their visit, as the gate would have
+        checkins = {e["person"]: e["how"] for e in shop.engine.events if e["type"] == "checkin"}
+        assert checkins == {ids[0]: "recognised", ids[2]: "floor"}
         people = session.meta()["people"]
-        assert people[ids[0]]["status"] == "known" and people[ids[2]] == {"status": "not_registered", "name": "Stayed Out"}
-        assert people[ids[4]] == {"status": "not_registered", "name": ""}
-        flagged = [e for e in shop.engine.events if e["type"] == "unregistered"]
-        assert sorted(e["person"] for e in flagged) == sorted([ids[2], ids[4]])  # said once each, not on every frame
+        assert people[ids[2]]["status"] == "known" and people[ids[4]] == {"status": "not_registered", "name": "", "face": None}
+        assert [e["person"] for e in shop.engine.events if e["type"] == "unregistered"] == [ids[4]]  # said once
 
         await session.finish()
-        assert [c["customer"] for c in shop.pay.charges] == ["cust_a"]  # one charge: the person the gate let in
-        assert session.payments[ids[0]][-1]["status"] == "succeeded"
-        assert session.payments[ids[2]][-1]["status"] == "not_registered" and session.payments[ids[4]][-1]["status"] == "not_registered"
-        assert book.open_visit(admitted) is None  # they left: the next visit starts at the gate
-        assert book.summary(stayed_out)["visits"] == 0
+        assert sorted(c["customer"] for c in shop.pay.charges) == ["cust_a", "cust_s"]
+        assert session.payments[ids[2]][-1]["status"] == "succeeded" and session.payments[ids[4]][-1]["status"] == "not_registered"
+        assert book.open_visit(admitted) is None and book.open_visit(skipped) is None  # both left
+        assert book.summary(skipped)["visits"] == 1
+
+    run(scenario())
+
+
+def test_one_sure_look_is_not_enough_without_the_gate(tmp_path):
+    shop = Shop(tmp_path, book=Book(tmp_path / "checkout.db"))
+    ids = play(shop)
+    skipped = registered(shop.book, "Skipped Gate", 11, "cust_s")
+    in_view(shop, {0: face(11)})
+    look(shop, 1)
+    assert not shop.session.who and shop.book.open_visit(skipped) is None
+    look(shop, 1)
+    assert shop.session.who == {ids[0]: skipped}
+
+
+def test_a_weak_resemblance_is_never_charged(tmp_path):
+    async def scenario():
+        shop = Shop(tmp_path, book=Book(tmp_path / "checkout.db"))
+        ids = play(shop)
+        book, session = shop.book, shop.session
+        alike = registered(book, "Alike", 13, "cust_l")
+        in_view(shop, {0: lookalike(face(13), 99)})
+        look(shop, 4)
+        assert not session.who and session.strangers[ids[0]] == "Alike" and book.open_visit(alike) is None
+        await session.finish()
+        assert shop.pay.charges == [] and session.payments[ids[0]][-1]["status"] == "not_registered"
 
     run(scenario())
 
@@ -259,14 +309,89 @@ def test_someone_flagged_is_picked_up_once_the_gate_lets_them_in(tmp_path):
     shop = Shop(tmp_path, book=Book(tmp_path / "checkout.db"))
     ids = play(shop)
     book, session = shop.book, shop.session
-    late = book.add("Late", face(13), "late@example.com")
-    book.set_card(late, "cust_l", "tok_l", "visa", "1881")
-    state = shop.engine.snapshot()
-    box = next(p["box"] for p in state["people"] if p["id"] == ids[0])
-    book.scene = [(face(13), (box[0] + box[2]) / 2, box[1] + 0.05)]
-    for _ in range(2):
-        session._faces(None, state)
+    late = registered(book, "Late", 13, "cust_l")
+    in_view(shop, {0: lookalike(face(13), 98)})
+    look(shop)
     assert session.strangers == {ids[0]: "Late"} and not session.who
-    book.admit(late)
-    session._faces(None, state)
-    assert session.who == {ids[0]: late} and not session.strangers
+    book.admit(late)  # the gate is sure of them; the floor needs only a likeness now
+    look(shop)
+    assert session.who == {ids[0]: late} and not session.strangers and not session.walk_ins
+
+
+def test_a_rehearsal_checks_in_on_the_floor_but_opens_no_visit(tmp_path):
+    async def scenario():
+        shop = Shop(tmp_path, book=Book(tmp_path / "checkout.db"), dry=True)
+        ids = play(shop)
+        skipped = registered(shop.book, "Skipped Gate", 11, "cust_s")
+        in_view(shop, {0: face(11)})
+        look(shop)
+        assert shop.session.who == {ids[0]: skipped} and shop.book.open_visit(skipped) is None
+        await shop.session.finish()
+        assert shop.pay.charges == [] and shop.session.payments[ids[0]][-1]["status"] == "dry"
+
+    run(scenario())
+
+
+def test_two_runs_watching_a_shopper_who_skipped_the_gate_charge_once(tmp_path):
+    async def scenario():
+        book = Book(tmp_path / "checkout.db")
+        skipped = registered(book, "Skipped Gate", 11, "cust_s")
+        first, second = Shop(tmp_path, book=book), Shop(tmp_path, book=book)
+        play(first)
+        pid = play(second)[0]
+        in_view(first, {0: face(11)})
+        look(first)
+        await first.session.finish()
+        assert [c["customer"] for c in first.pay.charges] == ["cust_s"]
+
+        # the same walk-out, watched by another run a moment later: recognised, and not charged again
+        in_view(second, {0: face(11)})
+        look(second)
+        assert second.session.who == {pid: skipped} and book.open_visit(skipped) is None
+        await second.session.finish()
+        assert second.pay.charges == [] and second.session.payments[pid][-1]["status"] == "settled"
+
+    run(scenario())
+
+
+def test_a_live_camera_bills_a_shopper_who_comes_back_after_paying(tmp_path):
+    async def scenario():
+        book = Book(tmp_path / "checkout.db")
+        skipped = registered(book, "Skipped Gate", 11, "cust_s")
+        first = Shop(tmp_path, book=book)
+        first.session.live = True
+        play(first)
+        in_view(first, {0: face(11)})
+        look(first)
+        await first.session.finish()
+        assert [c["customer"] for c in first.pay.charges] == ["cust_s"]
+
+        # a page on the same camera that was already watching while that visit was settled: the same walk-out
+        alongside = Shop(tmp_path, book=book)
+        alongside.session.live, alongside.session.started = True, first.session.started
+        pid = play(alongside)[0]
+        in_view(alongside, {0: face(11)})
+        look(alongside)
+        await alongside.session.finish()
+        assert alongside.pay.charges == [] and alongside.session.payments[pid][-1]["status"] == "settled"
+
+        # a page reloaded straight after the charge, the items still in their hands: not a new visit either
+        reloaded = Shop(tmp_path, book=book)
+        reloaded.session.live, reloaded.session.started = True, time.time() + 1
+        pid = play(reloaded)[0]
+        in_view(reloaded, {0: face(11)})
+        look(reloaded)
+        await reloaded.session.finish()
+        assert reloaded.pay.charges == [] and reloaded.session.payments[pid][-1]["status"] == "settled"
+
+        # a run started a few minutes after that visit was settled: they came back and took more, a new visit
+        book.db.execute("UPDATE admissions SET closed = closed - 300")
+        again = Shop(tmp_path, book=book)
+        again.session.live, again.session.started = True, time.time() + 1
+        pid = play(again)[0]
+        in_view(again, {0: face(11)})
+        look(again)
+        await again.session.finish()
+        assert [c["customer"] for c in again.pay.charges] == ["cust_s"]
+
+    run(scenario())

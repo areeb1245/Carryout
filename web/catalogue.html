@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Catalogue</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231f5c45'/%3E%3Cpath d='M4 5h8l-1 6H5z' fill='none' stroke='%23fff' stroke-width='1.4'/%3E%3C/svg%3E" />
+    <link rel="preload" href="/static/fonts/newsreader-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body class="staff">
+    <header class="bar app">
+      <span class="brand" id="brand">Shop</span>
+      <nav class="pages" aria-label="Screens">
+        <a href="/" data-page="floor">Floor</a>
+        <a href="/catalogue" data-page="catalogue">Catalogue</a>
+        <a href="/dashboard" data-page="dashboard">Dashboard</a>
+      </nav>
+      <span class="status"></span>
+      <a class="button" href="/gate" target="_blank" rel="noopener">Open gate</a>
+      <button type="button" class="icon" id="open-settings" aria-label="Settings" title="Settings">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+      </button>
+    </header>
+    <nav class="tabs" aria-label="Catalogue">
+      <a href="#products" data-tab="products">Products</a>
+      <a href="#footage" data-tab="footage">From footage</a>
+    </nav>
+
+    <main class="cat">
+      <section id="products-view" aria-label="Products">
+        <div class="toolbar">
+          <select id="shop" aria-label="Shop"></select>
+          <input type="search" id="filter" placeholder="Filter products" aria-label="Filter products" autocomplete="off" />
+          <span class="hint" id="count"></span>
+          <button type="button" id="add-product">Add product</button>
+          <button type="button" class="primary" id="save">Save</button>
+        </div>
+        <p class="hint note" id="note" role="status"></p>
+        <div class="scroll">
+          <table class="products">
+            <thead>
+              <tr><th scope="col">Pictures</th><th scope="col">Name</th><th scope="col">Maker</th><th scope="col">Category</th><th scope="col">Section</th><th scope="col">Camera phrase</th><th scope="col" class="num">Price</th><th><span class="sr">Remove</span></th></tr>
+            </thead>
+            <tbody id="products"></tbody>
+          </table>
+        </div>
+        <div class="rules">
+          <div class="field grow">
+            <label for="belongings">Never billed: shoppers' own things, comma separated</label>
+            <input id="belongings" type="text" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="leave-after">Exit after, seconds out of view</label>
+            <input id="leave-after" type="number" min="1" max="30" step="0.5" inputmode="decimal" />
+          </div>
+        </div>
+        <p class="hint" id="prompt-count"></p>
+        <input type="file" id="picture-file" accept="image/*" hidden />
+      </section>
+
+      <section id="footage-view" class="footage" aria-label="From footage" hidden>
+        <div class="reel">
+          <div class="toolbar">
+            <button type="button" class="primary" id="hold">Hold to camera</button>
+            <select id="cam-pick" aria-label="Camera" hidden></select>
+            <select id="clip" aria-label="Footage"></select>
+            <input type="file" id="clip-file" accept="video/*" hidden />
+            <input type="text" id="look-for" placeholder="Also look for, comma separated" aria-label="Also look for" autocomplete="off" />
+            <button type="button" id="look">Look again</button>
+            <button type="button" id="scan">Look at every frame</button>
+          </div>
+          <div class="frame" id="frame-box">
+            <video id="cam" playsinline muted hidden></video>
+            <canvas id="frame" width="960" height="540"></canvas>
+            <p class="frame-note" id="frame-note">Choose footage, or import a video of the products.</p>
+          </div>
+          <p class="capture" id="capture" role="status" hidden></p>
+          <div class="scrub" id="scrub">
+            <button type="button" class="icon" id="prev" aria-label="Previous frame">‹</button>
+            <input type="range" id="scrubber" min="0" max="0" value="0" aria-label="Frame" />
+            <button type="button" class="icon" id="next" aria-label="Next frame">›</button>
+            <span class="hint num" id="frame-at"></span>
+          </div>
+          <div class="strip" id="strip" aria-hidden="true"></div>
+          <p class="hint">Click an outline to pick it, or drag a box round anything the outlines missed.</p>
+        </div>
+
+        <aside class="pick" id="pick" aria-live="polite">
+          <p class="empty">Nothing picked yet.</p>
+        </aside>
+      </section>
+    </main>
+
+    <script src="/static/catalogue.js" type="module"></script>
+  </body>
+</html>

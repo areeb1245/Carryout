@@ -44,6 +44,13 @@ class FakePayPal:
             capture = self.captures.setdefault(key, f"CAP{len(self.captures) + 1}")  # the same key is the same payment
             unit = body["purchase_units"][0]
             return httpx.Response(201, json={"id": "ORDER1", "status": "COMPLETED", "purchase_units": [{"payments": {"captures": [{"id": capture, "status": "COMPLETED", "amount": unit["amount"]}]}}]})
+        if path.startswith("/v2/payments/captures/") and path.endswith("/refund"):
+            if path.split("/")[4] not in self.captures.values():
+                return httpx.Response(404, json={"name": "RESOURCE_NOT_FOUND", "details": [{"issue": "INVALID_RESOURCE_ID", "description": "Specified resource ID does not exist."}]})
+            key = request.headers["paypal-request-id"]
+            self.refunds = getattr(self, "refunds", {})
+            refund = self.refunds.setdefault(key, f"REF{len(self.refunds) + 1}")  # the same key is the same refund
+            return httpx.Response(201, json={"id": refund, "status": "COMPLETED", "amount": body["amount"]})
         if path == "/v2/invoicing/invoices" and request.method == "POST":
             return httpx.Response(201, json={"id": "INV2-AAAA", "status": "DRAFT"})
         if path.endswith("/send") or path.endswith("/payments"):
@@ -166,5 +173,24 @@ def test_the_invoice_is_written_marked_paid_and_not_emailed_by_paypal():
         assert [(i["name"], i["description"], i["unit_amount"]["value"]) for i in draft["items"]] == [("Elon Musk", "Books · Biography", "79.00"), ("Deep Work", "Books · Productivity", "59.00")]
         assert paypal.sent("/v2/invoicing/invoices/INV2-AAAA/send")[0][0] == {"send_to_recipient": False, "send_to_invoicer": False}
         assert paypal.sent("/v2/invoicing/invoices/INV2-AAAA/payments")[0][0]["amount"] == {"currency_code": "USD", "value": "138.00"}
+
+    run(scenario())
+
+
+def test_a_refund_goes_back_once_however_often_it_is_asked_for():
+    async def scenario():
+        pay, paypal = provider()
+        paid = await pay.charge(Card("CUST1", "VAULT-CARD", "visa", "1881"), 249.0, "USD", "Walk-out checkout", "s1-1-0")
+        back = await pay.refund(paid["id"], 79.0, "USD", "refund-7-31-0", "Refund for Elon Musk")
+        assert back == {"amount": 79.0, "currency": "usd", "id": "REF1", "status": "refunded", "message": ""}
+        (body, headers), = paypal.sent(f"/v2/payments/captures/{paid['id']}/refund")
+        assert body == {"amount": {"currency_code": "USD", "value": "79.00"}, "note_to_payer": "Refund for Elon Musk"}
+        assert headers["paypal-request-id"] == "refund-7-31-0"
+        again = await pay.refund(paid["id"], 79.0, "USD", "refund-7-31-0")  # a retry of the same refund
+        assert again["id"] == "REF1"
+        missing = await pay.refund("NOPE", 5.0, "USD", "refund-x")
+        assert missing["status"] == "failed" and "INVALID_RESOURCE_ID" in missing["message"]
+        nothing = await pay.refund(paid["id"], 0.0, "USD", "refund-y")
+        assert nothing["status"] == "failed" and len(paypal.sent(f"/v2/payments/captures/{paid['id']}/refund")) == 2  # never sent
 
     run(scenario())

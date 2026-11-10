@@ -1,7 +1,55 @@
 {
   "name": "Supermarket",
   "currency": "USD",
+  "frame_width": 960,
+  "leave_after_s": 3.0,
   "products": [
+    {
+      "id": "pmwawnx7s",
+      "name": "Wireless Earbuds Charging Case - Airpods",
+      "prompt": "charging case",
+      "price": 299.0,
+      "cues": "small white rounded rectangular case, grey label, glossy plastic",
+      "category": "Electronics",
+      "section": "Mobile Accessories",
+      "examples": [
+        "ex-7c05d01ea4dd4be4.jpg",
+        "ex-71cba51dd5964153.jpg",
+        "ex-e0864aedc01a4e7b.jpg",
+        "ex-7a0a194230294e03.jpg"
+      ]
+    },
+    {
+      "id": "pmwavqujo",
+      "name": "masafi tissue pack",
+      "prompt": "tissue pack",
+      "price": 10.0,
+      "author": "masafi",
+      "cues": "rectangular pack, white and blue, 'masafi' printed, plastic wrap",
+      "category": "Toiletries",
+      "section": "Tissue Rolls",
+      "examples": [
+        "ex-cff6cecb3e3e4049.jpg",
+        "ex-89178dfa32964077.jpg",
+        "ex-28c3145609c84a16.jpg",
+        "ex-f5977418f69a4b18.jpg"
+      ]
+    },
+    {
+      "id": "pmwavoqmj",
+      "name": "Wireless Power Bank",
+      "prompt": "wireless power bank",
+      "price": 59.0,
+      "cues": "grey rectangular, circle and dash symbols, slim, matte",
+      "category": "Electronics",
+      "section": "Mobile Accessories",
+      "examples": [
+        "ex-1dbfaba3402346d1.jpg",
+        "ex-a710ca729f2c4720.jpg",
+        "ex-031384c5e8e4443a.jpg",
+        "ex-ef4e068238c84521.jpg"
+      ]
+    },
     {
       "id": "frozen-meal",
       "name": "Frozen meal",

@@ -1,8 +1,11 @@
 """
 Client for a SAM 3.1 endpoint on Modal.
 
-    POST /v1/segment  {image_base64, prompts, threshold, return_masks}
-        -> {image: {w, h}, detections: [{label, box, score, polygons}], ms}
+    POST /v1/segment  {image_base64, prompts, threshold, return_masks, exemplars?}
+        -> {image: {w, h}, detections: [{label, box, score, polygons, exemplar?}], ms}
+    POST /v1/embed    {images_base64} -> {vectors, dim, ms}      (sam3-supermarket only)
+
+`exemplars` are SAM 3's visual prompts: boxes round examples in the same picture ("more like this one").
 
 Two apps speak this: `sam3-supermarket` (modal_app/sam_checkout.py: all phrases in one pass on an L40S, up to 16 a
 request) and the older shared `deck-twin-sam31` (one phrase at a time on an A10G, up to 8, 240 requests a minute).
@@ -33,7 +36,8 @@ def load_env(path: Path = ROOT / ".env") -> dict[str, str]:
             if "=" in line and not line.lstrip().startswith("#"):
                 key, value = line.split("=", 1)
                 env[key.strip()] = value.strip()
-    return {**env, **{k: v for k, v in os.environ.items() if k.startswith("SAM_")}}
+    # the process environment wins: a hosted copy (Render) has no .env, only environment variables
+    return {**env, **os.environ}
 
 
 MAX_PROMPTS = int(load_env().get("SAM_MAX_PROMPTS", 8))
@@ -70,26 +74,45 @@ class SamClient:
         r.raise_for_status()
         return r.json()
 
-    async def segment(self, jpeg: bytes, prompts: list[str], threshold: float = 0.3) -> dict:
-        """All `prompts` on one image. More than 8 are split over parallel requests and merged."""
-        chunks = [prompts[i : i + MAX_PROMPTS] for i in range(0, len(prompts), MAX_PROMPTS)]
-        parts = await asyncio.gather(*(self._segment(jpeg, chunk, threshold) for chunk in chunks))
+    async def segment(self, jpeg: bytes, prompts: list[str], threshold: float = 0.3, exemplars: list[dict] | None = None) -> dict:
+        """All `prompts` on one image. More than 8 are split over parallel requests and merged. `exemplars`
+        ([{prompt, label, boxes, labels}], boxes x0 y0 x1 y1 in 0..1 on this image) go with the first request."""
+        chunks = [prompts[i : i + MAX_PROMPTS] for i in range(0, len(prompts), MAX_PROMPTS)] or [[]]
+        parts = await asyncio.gather(*(self._segment(jpeg, chunk, threshold, exemplars if i == 0 else None) for i, chunk in enumerate(chunks)))
         merged = dict(parts[0])
         merged["detections"] = [d for part in parts for d in part["detections"]]
         merged["ms"] = max(part.get("ms", 0) for part in parts)
         return merged
 
-    async def _segment(self, jpeg: bytes, prompts: list[str], threshold: float) -> dict:
+    async def embed(self, pictures: list[bytes]) -> list[list[float]]:
+        """A vector per picture (JPEG), L2-normalised: the cosine of two says how alike they look."""
+        out: list[list[float]] = []
+        for i in range(0, len(pictures), 16):
+            batch = pictures[i : i + 16]
+            r = await self._post("/v1/embed", {"images_base64": [base64.b64encode(b).decode() for b in batch]})
+            out.extend(r["vectors"])
+        return out
+
+    async def _segment(self, jpeg: bytes, prompts: list[str], threshold: float, exemplars: list[dict] | None = None) -> dict:
         cache_file = None
+        key = [prompts, threshold] + ([exemplars] if exemplars else [])  # text-only keys stay as they were
         if self.cache_dir:
-            digest = hashlib.sha1(jpeg + json.dumps([prompts, threshold]).encode()).hexdigest()
+            digest = hashlib.sha1(jpeg + json.dumps(key).encode()).hexdigest()
             cache_file = self.cache_dir / f"{digest}.json"
             if cache_file.exists():
                 return json.loads(cache_file.read_text())
         body = {"image_base64": base64.b64encode(jpeg).decode(), "prompts": prompts, "threshold": threshold, "return_masks": True}
+        if exemplars:
+            body["exemplars"] = exemplars
+        result = await self._post("/v1/segment", body)
+        if cache_file:
+            cache_file.write_text(json.dumps(result))
+        return result
+
+    async def _post(self, path: str, body: dict) -> dict:
         for attempt in range(4):
             try:
-                r = await self.http.post(f"{self.url}/v1/segment", json=body)
+                r = await self.http.post(f"{self.url}{path}", json=body)
             except httpx.TransportError as e:
                 if attempt == 3:
                     raise SamError(f"endpoint unreachable: {e}") from e
@@ -103,8 +126,5 @@ class SamClient:
                 continue
             if r.status_code != 200:
                 raise SamError(f"endpoint answered {r.status_code}: {r.text[:200]}")
-            result = r.json()
-            if cache_file:
-                cache_file.write_text(json.dumps(result))
-            return result
+            return r.json()
         raise SamError("endpoint kept refusing the request (rate limit)")

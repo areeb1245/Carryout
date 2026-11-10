@@ -184,8 +184,9 @@ def test_walking_out_charges_what_was_kept_and_nothing_that_was_put_back(tmp_pat
         assert len(shop.pay.charges) == 3
         statuses = {pid: shop.session.payments[pid][-1]["status"] for pid in ids}
         assert [statuses[pid] for pid in ids] == ["succeeded", "nothing_due", "succeeded", "nothing_due", "succeeded"]
-        # everyone who walked out has left: their next visit starts at the gate again
-        assert all(shop.book.open_visit(p) is None for p in profiles)
+        # whoever walked out with something has left: their next visit starts at the gate again. The two who
+        # left the picture with empty hands have not finished a visit, so theirs stays open.
+        assert [shop.book.open_visit(p) is None for p in profiles] == [True, False, True, False, True]
         # the visit history says the same
         assert [shop.book.summary(p)["spent"] for p in profiles] == [3.0, 0.0, 3.0, 0.0, 3.0]
         assert shop.book.summary(profiles[0])["recent"] == ["Can"]
@@ -207,6 +208,7 @@ def test_card_declined_leaves_the_lines_unpaid(tmp_path):
         shop.pay.charge = decline
         profile = shop.book.add("Declined", None)
         shop.book.set_card(profile, "cus_d", "pm_d", "visa", "0341")
+        shop.book.admit(profile)  # the floor only links a shopper the gate has let in
         shop.session.who[ids[0]] = profile
         await shop.session.finish()
         assert shop.session.payments[ids[0]][-1]["status"] == "declined"

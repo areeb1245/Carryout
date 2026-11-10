@@ -63,8 +63,8 @@ function showIdle(kind = "idle") {
 function showIn(profile, isNew) {
   const method = esc(profile.method);
   const head = isNew
-    ? `<h1>You're in, ${esc(profile.name.split(" ")[0])}.</h1><p class="lede">We charge <strong>${method}</strong> when you walk out and email the invoice to <strong>${esc(profile.email)}</strong>.</p>`
-    : `<h1>Welcome back, ${esc(profile.name.split(" ")[0])}.</h1><p class="lede"><strong>${method}</strong> is on file.</p>`;
+    ? `<h1>You're in, ${esc(profile.name.split(" ")[0])}</h1><p class="lede">We charge <strong>${method}</strong> when you walk out and email the invoice to <strong>${esc(profile.email)}</strong>.</p>`
+    : `<h1>Welcome back, ${esc(profile.name.split(" ")[0])}</h1><p class="lede"><strong>${method}</strong> is on file.</p>`;
   const nth = profile.visits + 1;
   const history = !isNew && profile.visits ? `<p class="hint history">Your ${ordinal(nth)} visit.${profile.recent?.length ? ` Last time: ${esc(profile.recent.join(", "))}.` : ""}</p>` : "";
   G.shown = "";
@@ -77,7 +77,7 @@ function showForm(problem = "") {
   const cards = Object.entries(G.config.test_cards).map(([id, label]) => `<option value="${esc(id)}">${esc(label)}</option>`).join("");
   const d = G.draft;
   const head = known
-    ? `<h1>Welcome back, ${esc(known.name.split(" ")[0])}.</h1><p class="lede">Add a way to pay and you are in.</p>`
+    ? `<h1>Welcome back, ${esc(known.name.split(" ")[0])}</h1><p class="lede">Add a way to pay and you are in.</p>`
     : `<h1>First time here?</h1><p class="lede">Register once. After that you just walk in.</p>`;
   const you = known
     ? ""
@@ -247,7 +247,9 @@ function frameFace(answer) {
   Object.assign(seen.style, { left: `${dx + x0 * w * scale}px`, top: `${dy + y0 * h * scale}px`, width: `${(x1 - x0) * w * scale}px`, height: `${(y1 - y0) * h * scale}px` });
   seen.classList.add("on");
   seen.classList.toggle("known", answer.status === "known");
-  $("seen-name").textContent = answer.status === "known" ? answer.profile.name : answer.status === "new" ? "Not registered" : "";
+  // who the gate takes this face for, and how well it matches the face they registered with
+  const sure = answer.score ? `, ${Math.round(answer.score * 100)}% match` : "";
+  $("seen-name").textContent = answer.status === "known" ? `${answer.profile.name}${sure}` : answer.status === "new" ? "Not registered" : "";
 }
 
 async function look() {
@@ -380,7 +382,7 @@ $("use-photo").onclick = () => $("photo-file").click();
 $("photo-file").onchange = () => usePhoto($("photo-file").files[0]);
 
 async function boot() {
-  G.config = await (await fetch("/api/config")).json();
+  G.config = await (await fetch("/api/gate/config")).json();
   const shop = G.config.shops.find((x) => x.id === G.config.shop)?.name ?? "Shop";
   $("brand").textContent = shop;
   document.title = `${shop}: the gate`;

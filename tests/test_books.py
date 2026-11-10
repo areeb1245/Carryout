@@ -213,3 +213,124 @@ def test_a_title_wrongly_seen_put_back_returns_to_the_cart_when_read_in_the_hand
         assert engine.carts()[0]["total"] == 59  # and never twice
 
     asyncio.run(scenario())
+
+
+class Looks:
+    """A second model whose answers a test sets: what it reads in the shopper's hands on the next look."""
+
+    enabled = True
+
+    def __init__(self):
+        self.reads, self.unreadable = ["deep-work"], 0
+
+    async def carried(self, frame, box, products):
+        return {"products": list(self.reads), "unreadable": self.unreadable, "hands_visible": True, "why": "what the test says"}
+
+
+def test_a_book_still_in_the_hand_is_not_taken_for_put_down_when_its_title_stops_showing(tmp_path):
+    """A live shopper turns a book over, or lays another on top of it. The looks stop reading its title, but it has
+    not gone anywhere: its outline is still in their hand, or the look says there is something there it cannot read."""
+    import asyncio
+
+    from checkout.pipeline import Services, Session
+
+    async def scenario():
+        hands = Looks()
+        session = Session(Services(None, hands), BOOKS)
+        engine = session.engine
+        shelf = Shelf()
+        shelf.engine = engine
+        shelf.settle_in()
+        shelf.take_first()  # a book in the hand, outline in view
+        pid = engine.snapshot()["people"][0]["id"]
+
+        async def look(t):
+            await session._ask_hand(pid, t, None, [0, 0, 1, 1])
+
+        await look(4.0)
+        await look(5.0)
+        assert engine.carts()[0]["total"] == 59  # read twice: Deep Work is on the bill
+        hands.reads = []  # turned away: the title is not read any more
+        for t in (6.0, 7.0, 8.0, 9.0, 10.0, 11.0):
+            await look(t)
+        assert engine.has_title(pid, "deep-work") and engine.carts()[0]["total"] == 59  # its outline never left the hand
+
+        engine.entries[0].item.visible = False  # now hidden under another book, which the look cannot read
+        hands.unreadable = 1
+        for t in (12.0, 13.0, 14.0, 15.0, 16.0):
+            await look(t)
+        assert engine.has_title(pid, "deep-work")
+        hands.unreadable = 0  # hands in view with nothing in them that could be it: it was put down
+        for t in (17.0, 18.0, 19.0):
+            await look(t)
+        assert not engine.has_title(pid, "deep-work") and engine.carts()[0]["total"] == 0
+
+    asyncio.run(scenario())
+
+
+def test_a_book_taken_in_the_last_seconds_is_read_from_the_last_pictures_at_the_door(tmp_path):
+    """Someone takes a book and walks straight out: no look made in time. The pictures kept of them leaving are read
+    again at the door, and the title needs two of them, as it always does."""
+    import asyncio
+
+    import numpy as np
+
+    from checkout.pipeline import Services, Session
+
+    async def scenario(pictures):
+        session = Session(Services(None, Looks()), BOOKS)
+        engine = session.engine
+        shelf = Shelf()
+        shelf.engine = engine
+        shelf.settle_in()
+        shelf.take_first()
+        pid = engine.snapshot()["people"][0]["id"]
+        assert engine.unnamed(pid) == 1 and engine.carts()[0]["total"] == 0
+        picture = np.zeros((40, 40, 3), np.uint8)
+        session.evidence[pid] = {"read": {}, "recent": [], "last": [(5.0 + n, picture, [0, 0, 1, 1], picture) for n in range(pictures)]}
+        await session._last_looks(pid)
+        return engine.carts()[0], session.evidence[pid]["read"]
+
+    cart, read = asyncio.run(scenario(2))
+    assert cart["total"] == 59 and [(l["name"], l["verified"]) for l in cart["lines"]] == [("Deep Work", "confirmed")]
+    assert "at exit" in cart["lines"][0]["why"] and "deep-work" in read  # with the picture it was read in
+    cart, _ = asyncio.run(scenario(1))
+    assert cart["total"] == 0 and cart["lines"][0]["unread"]  # one picture is one look: not enough
+
+
+def test_a_title_not_in_the_hands_as_they_leave_is_not_charged(tmp_path):
+    """Kept, or back on the shelf? The last pictures of a leaving shopper decide for every title on their bill: read
+    in their hands, or one of the things in them that could not be read, or gone."""
+    import asyncio
+
+    import numpy as np
+
+    from checkout.pipeline import Services, Session
+
+    async def scenario(reads, unreadable, pictures=3):
+        hands = Looks()
+        session = Session(Services(None, hands), BOOKS)
+        engine = session.engine
+        shelf = Shelf()
+        shelf.engine = engine
+        shelf.settle_in()
+        pid = engine.snapshot()["people"][0]["id"]
+        for t in (1.0, 2.0):  # Deep Work, read twice in their hands, is on the bill
+            await session._ask_hand(pid, t, None, [0, 0, 1, 1])
+        assert engine.carts()[0]["total"] == 59
+        hands.reads, hands.unreadable = reads, unreadable
+        picture = np.zeros((40, 40, 3), np.uint8)
+        session.evidence[pid]["last"] = [(8.0 + n, picture, [0, 0, 1, 1], picture) for n in range(pictures)]
+        await session._last_looks(pid)
+        return engine.carts()[0]
+
+    kept = asyncio.run(scenario(["deep-work"], 0))
+    assert kept["total"] == 59 and kept["lines"][0]["audit"] is None  # read as they left: stays, for the last check
+    gone = asyncio.run(scenario([], 0))  # hands in view, nothing in them: it went back on the shelf
+    assert gone["total"] == 0 and gone["lines"][0]["audit"] == "put_back" and "last 3 pictures" in gone["lines"][0]["audit_why"]
+    hidden = asyncio.run(scenario([], 1))  # something in their hands that could not be read: the benefit of the doubt
+    assert hidden["total"] == 59 and hidden["lines"][0]["audit"] is None
+    other = asyncio.run(scenario(["shoe-dog"], 0))  # they left with another book, not this one
+    assert [(l["name"], l["charge"]) for l in other["lines"]] == [("Deep Work", False), ("Shoe Dog", True)] and other["total"] == 65
+    one = asyncio.run(scenario([], 0, pictures=1))  # a single picture takes nothing off a bill
+    assert one["total"] == 59

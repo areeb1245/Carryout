@@ -1,8 +1,10 @@
-/* One stylesheet for the shop floor (index.html) and the gate (gate.html).
+/* One stylesheet for every screen: the staff's floor, catalogue and dashboard, and the shoppers' gate.
 
    Paper and bottle green. An off-white page, near-black text, and one green that is only ever "go": the main
    button, "you're in", "paid". Newsreader for headings and totals, Instrument Sans for everything else.
-   Spacing only from 4 8 12 16 24 32 48 64 96. Radius 4 for controls, 8 for containers. Shadows on overlays only. */
+   Spacing only from 4 8 12 16 24 32 48 64 96. Radius 4 for controls, 8 for containers. Shadows on overlays only.
+   The staff screens (body.staff) are a tool used all day on a desktop: denser, 36 px controls, one header.
+   The gate is for shoppers on their feet, often on a phone: 44 px controls and more air. */
 
 @font-face {
   font-family: "Newsreader";
@@ -34,6 +36,13 @@
   --sans: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --serif: "Newsreader", ui-serif, "Iowan Old Style", Georgia, serif;
   --out: cubic-bezier(0.22, 1, 0.36, 1);
+  --control: 44px;
+  --chart: oklch(0.55 0.11 160);
+}
+
+body.staff {
+  --control: 36px;
+  font-size: 15px;
 }
 
 *,
@@ -115,7 +124,7 @@ button,
 .button {
   font: inherit;
   color: var(--ink);
-  min-height: 44px;
+  min-height: var(--control);
   padding: 0 12px;
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -188,6 +197,21 @@ button.quiet:hover,
   color: var(--ink);
 }
 
+button.icon {
+  width: var(--control);
+  min-width: var(--control);
+  padding: 0;
+  color: var(--muted);
+}
+
+button.icon:hover {
+  color: var(--ink);
+}
+
+button.danger {
+  color: var(--bad);
+}
+
 button:disabled {
   opacity: 0.5;
   cursor: default;
@@ -210,11 +234,15 @@ label,
   gap: 4px;
 }
 
+.field.narrow input {
+  max-width: 96px;
+}
+
 .check {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 44px;
+  min-height: var(--control);
   cursor: pointer;
 }
 
@@ -252,6 +280,10 @@ input[type="radio"] {
   background: var(--bad);
 }
 
+.dot.warn {
+  background: var(--held);
+}
+
 .face {
   flex: none;
   width: 44px;
@@ -270,7 +302,7 @@ input[type="radio"] {
   color: var(--muted);
 }
 
-/* ---------- the top bar, on both screens ---------- */
+/* ---------- the top bar ---------- */
 
 .bar {
   display: flex;
@@ -301,16 +333,76 @@ input[type="radio"] {
   gap: 8px;
 }
 
+/* the staff screens: one header, the same on all three, with the screens as tabs and the gear at the end */
+.bar.app {
+  max-width: none;
+  gap: 8px;
+  height: 56px;
+  padding: 0 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.bar.app .brand {
+  margin-right: 24px;
+  font-size: 20px;
+  white-space: nowrap;
+}
+
+.pages {
+  align-self: stretch;
+  gap: 24px !important;
+}
+
+.pages a,
+.tabs a {
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  transition: color 140ms var(--out);
+}
+
+.pages a {
+  padding-top: 2px;
+}
+
+.pages a:hover,
+.tabs a:hover {
+  color: var(--ink);
+}
+
+.pages a[aria-current],
+.tabs a[aria-current] {
+  color: var(--ink);
+  font-weight: 500;
+  border-bottom-color: var(--green);
+}
+
+.bar.app .status {
+  margin-right: 8px;
+}
+
+/* a screen's own views (Overview, Transactions, ...), under the header */
+.tabs {
+  display: flex;
+  gap: 24px;
+  height: 44px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--line);
+}
+
 /* ---------- shop floor ---------- */
 
 .floor {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 400px;
-  gap: 48px;
+  gap: 24px;
   align-items: start;
-  max-width: 1440px;
+  max-width: 1600px;
   margin: 0 auto;
-  padding: 8px 32px 96px;
+  padding: 16px 24px 32px;
 }
 
 .viewer {
@@ -365,8 +457,8 @@ input[type="radio"] {
   display: flex;
   flex-wrap: wrap;
   align-items: end;
-  gap: 12px 16px;
-  margin-top: 16px;
+  gap: 8px 12px;
+  margin-top: 12px;
 }
 
 .controls .field.grow {
@@ -395,12 +487,22 @@ input[type="radio"] {
   align-items: baseline;
   justify-content: space-between;
   gap: 16px;
-  padding-bottom: 12px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--line);
 }
 
+.section-head select {
+  min-height: 32px;
+  margin-right: auto;
+  font-size: 14px;
+}
+
+.bag.new {
+  animation: arrive 300ms var(--out);
+}
+
 .stage .section-head {
-  margin-top: 48px;
+  margin-top: 16px;
 }
 
 /* activity */
@@ -412,6 +514,10 @@ input[type="radio"] {
   gap: 12px;
   padding: 12px 0;
   border-bottom: 1px solid var(--line);
+}
+
+.events.clock li {
+  grid-template-columns: 72px 8px minmax(0, 1fr);
 }
 
 .events li.new {
@@ -544,6 +650,15 @@ input[type="radio"] {
 
 .lines .note.flag {
   color: var(--held);
+}
+
+.lines .note b {
+  font-weight: 600;
+}
+
+.figures dd a {
+  color: var(--held);
+  text-decoration: none;
 }
 
 .mark {
@@ -694,7 +809,7 @@ dialog[open] {
 }
 
 .settings {
-  width: min(1120px, calc(100vw - 32px));
+  width: min(560px, calc(100vw - 32px));
   max-height: calc(100vh - 64px);
 }
 
@@ -705,48 +820,47 @@ dialog[open] {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 32px;
+  padding: 12px 24px;
   background: var(--bg);
   border-bottom: 1px solid var(--line);
 }
 
+.settings-head h2 {
+  font-size: 20px;
+}
+
 .settings-body {
-  padding: 0 32px 32px;
+  padding: 0 24px 16px;
 }
 
 .settings section {
-  padding: 32px 0;
+  padding: 16px 0;
   border-bottom: 1px solid var(--line);
 }
 
 .settings section:last-child {
   border-bottom: 0;
-  padding-bottom: 0;
 }
 
-.settings h3 {
-  font: 500 20px/1.2 var(--serif);
-  letter-spacing: -0.01em;
-}
-
-.settings h3 + .hint {
-  max-width: 72ch;
-  margin-top: 8px;
+.settings h3,
+.phrases h3 {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
 }
 
 .toggles {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0 24px;
-  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+  margin-top: 4px;
   border: 0;
 }
 
 .services {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 8px 32px;
-  margin-top: 16px;
+  gap: 8px;
+  margin-top: 8px;
   font-size: 14px;
 }
 
@@ -756,158 +870,447 @@ dialog[open] {
   gap: 8px;
 }
 
+.services strong {
+  font-weight: 500;
+  margin-right: 4px;
+}
+
 .services .dot {
   align-self: flex-start;
-  margin-top: 8px;
-}
-
-.profile-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(288px, 1fr));
-  gap: 0 32px;
-  margin-top: 8px;
-}
-
-.profile-list li {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 16px 0;
-  border-bottom: 1px solid var(--line);
-}
-
-.profile-list .who {
-  display: grid;
-  min-width: 0;
-}
-
-.profile-list .who strong {
-  font-weight: 500;
-}
-
-.profile-list .sub {
-  overflow-wrap: anywhere;
-}
-
-/* The column headings stay under the panel's own heading while the products scroll past them. That needs the
-   table to scroll with the panel, so the sideways scrolling for narrow screens is only switched on down there. */
-.catalog thead th {
-  position: sticky;
-  top: 77px; /* the height of .settings-head: 16 + 44 + 16 and its 1px rule */
-  z-index: 1;
-  padding-top: 12px;
-  padding-bottom: 12px;
-  background: var(--bg);
-  box-shadow: inset 0 -1px 0 var(--line);
-  vertical-align: bottom;
-}
-
-.catalog-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.catalog-head .hint {
-  max-width: 72ch;
-  margin-top: 8px;
-}
-
-.catalog table {
-  width: 100%;
-  min-width: 800px;
-  margin-top: 16px;
-  border-collapse: collapse;
-}
-
-.catalog th {
-  padding: 0 8px 8px 0;
-  white-space: nowrap;
-  font-size: 14px;
-  font-weight: 400;
-  color: var(--muted);
-  text-align: left;
-}
-
-.catalog th.num {
-  padding-right: 16px;
-  text-align: right;
-}
-
-.catalog td {
-  padding: 4px 8px 4px 0;
-  vertical-align: top;
-}
-
-.catalog td:nth-child(2),
-.catalog td:nth-child(4) {
-  width: 17%;
-}
-
-.catalog td:nth-child(3),
-.catalog td:nth-child(5) {
-  width: 12%;
-}
-
-.catalog td:nth-child(6) {
-  width: 96px;
-}
-
-.catalog td:last-child {
-  width: 44px;
-  padding-right: 0;
-}
-
-.catalog td small {
-  display: block;
-  padding: 4px 0 8px;
-  font-size: 14px;
-  color: var(--muted);
-}
-
-.catalog td button {
-  width: 44px;
-  padding: 0;
-  color: var(--muted);
-}
-
-.catalog tr.group th {
-  padding: 24px 0 8px;
-  font-size: 16px;
-  font-weight: 500;
-  color: var(--ink);
-  border-bottom: 1px solid var(--line);
-}
-
-.catalog tr.group:first-child th {
-  padding-top: 8px;
-}
-
-.catalog tr.group span {
-  margin-left: 8px;
-  font-size: 14px;
-  font-weight: 400;
-  color: var(--muted);
+  margin-top: 7px;
 }
 
 .num {
   text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 16px;
+  gap: 8px 12px;
+  margin-top: 8px;
+}
+
+.row.between {
+  justify-content: space-between;
+}
+
+/* ---------- the catalogue screen ---------- */
+
+.cat {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 16px 24px 48px;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.toolbar input[type="search"],
+.toolbar input[type="text"] {
+  flex: 1 1 200px;
+  max-width: 320px;
+  width: auto;
+}
+
+input[type="search"] {
+  font: inherit;
+  min-height: var(--control);
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.toolbar .hint {
+  margin-right: auto;
+}
+
+.reel .toolbar select {
+  flex: 0 1 260px;
+  min-width: 0;
+}
+
+.reel .toolbar input[type="text"] {
+  flex: 1 1 160px;
+}
+
+.note {
+  min-height: 20px;
+  margin-top: 4px;
+}
+
+.products {
+  width: 100%;
+  min-width: 960px;
+  border-collapse: collapse;
+}
+
+.products th {
+  padding: 0 8px 6px 0;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--muted);
+  text-align: left;
+}
+
+.products thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding-top: 8px;
+  background: var(--bg);
+  box-shadow: inset 0 -1px 0 var(--line);
+}
+
+.products th.num {
+  padding-right: 16px;
+  text-align: right;
+}
+
+.products td {
+  padding: 3px 8px 3px 0;
+  vertical-align: top;
+}
+
+.products td input {
+  min-height: 32px;
+  padding: 0 8px;
+}
+
+.products td:nth-child(1) {
+  width: 152px;
+}
+
+.products td:nth-child(2) {
+  width: 20%;
+}
+
+.products td:nth-child(7) {
+  width: 88px;
+}
+
+.products td:last-child {
+  width: 32px;
+  padding-right: 0;
+}
+
+.products td:last-child button {
+  min-height: 32px;
+}
+
+.products td small {
+  display: block;
+  padding: 2px 0 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.products tr.group th {
+  padding: 16px 0 6px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+  border-bottom: 1px solid var(--line);
+}
+
+.products tr.group span {
+  margin-left: 4px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.pics {
+  display: flex;
+  gap: 4px;
+}
+
+.thumb {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 4px;
+}
+
+.thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.thumb[data-i]:hover img {
+  opacity: 0.4;
+}
+
+.thumb.add {
+  color: var(--muted);
+  border-style: dashed;
+}
+
+.rules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
   margin-top: 16px;
 }
 
-.stack {
+.rules .field.grow {
+  flex: 1 1 360px;
+  max-width: 640px;
+}
+
+.rules + .hint {
+  margin-top: 8px;
+}
+
+/* footage: the frame on the left, the picked object on the right */
+.footage {
   display: grid;
-  gap: 16px;
-  margin-top: 16px;
+  grid-template-columns: minmax(0, 1fr) 420px;
+  gap: 24px;
+  align-items: start;
+}
+
+.frame {
+  position: relative;
+  margin-top: 8px;
+  max-height: 68vh;
+  aspect-ratio: 16 / 9;
+  background: var(--wash);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.frame canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.frame video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.frame video + canvas {
+  position: relative;
+}
+
+.capture {
+  margin-top: 8px;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.thumb.big {
+  width: 64px;
+  min-width: 64px;
+  height: 64px;
+}
+
+.views h3 {
+  margin-bottom: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.frame-note {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.scrub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.scrub input[type="range"] {
+  flex: 1;
+  accent-color: var(--green);
+}
+
+.scrub .hint {
+  min-width: 132px;
+}
+
+.strip {
+  display: flex;
+  gap: 1px;
+  height: 8px;
+  margin: 4px 0 8px;
+}
+
+.strip span {
+  flex: 1;
+  background: var(--line);
+  border-radius: 1px;
+  cursor: pointer;
+}
+
+.strip .seen {
+  background: var(--chart);
+}
+
+.strip .none {
+  background: oklch(0.8 0.01 160);
+}
+
+.strip .busy {
+  background: var(--held);
+}
+
+.strip .at {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+.pick {
+  position: sticky;
+  top: 16px;
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.pick-head {
+  display: flex;
+  gap: 12px;
+}
+
+.pick-head img {
+  flex: none;
+  width: 96px;
+  height: 96px;
+  object-fit: contain;
+  background: var(--wash);
+  border-radius: 4px;
+}
+
+.pick-head .row {
+  margin-top: 8px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+}
+
+.form-grid .span {
+  grid-column: 1 / -1;
+}
+
+.phrases {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 8px;
+  font-size: 14px;
+  background: var(--wash);
+  border-radius: 4px;
+}
+
+.chip button {
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+}
+
+.chips input {
+  flex: 1 1 120px;
+  min-height: 30px;
+  width: auto;
+}
+
+.ranked-phrases {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.ranked-phrases th {
+  padding: 4px 8px 4px 0;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--muted);
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+
+.ranked-phrases td {
+  padding: 2px 8px 2px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.ranked-phrases tr.chosen td {
+  background: var(--green-wash);
+}
+
+.check.tight {
+  min-height: 28px;
+}
+
+.add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.add select {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
+.add .or {
+  font-size: 14px;
+  color: var(--muted);
 }
 
 /* ---------- the gate ---------- */
@@ -1201,9 +1604,624 @@ form.register {
   color: var(--muted);
 }
 
+/* ---------- staff sign-in ---------- */
+
+.signin {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.signin-card {
+  display: grid;
+  gap: 16px;
+  width: min(360px, 100%);
+}
+
+.signin-card h1 {
+  font-size: 32px;
+  line-height: 1.1;
+}
+
+.signin-card input {
+  width: 100%;
+}
+
+.signin-card button.primary {
+  width: 100%;
+}
+
+.signin-card .button.quiet {
+  justify-self: center;
+  font-size: 14px;
+}
+
+.signin-card .error {
+  color: var(--bad);
+  font-size: 14px;
+}
+
 /* ---------- narrower screens ---------- */
 
+/* ---------- the dashboard ---------- */
+
+/* The same paper, ink and green. Charts are drawn in --chart, a step of the green that is light and strong
+   enough to read as a mark (the button green is too dark for one). Figures are in the serif, like the totals. */
+
+:root {
+  --chart: oklch(0.55 0.11 160);
+}
+
+.dash {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 16px 24px 48px;
+}
+
+.dash > section + section,
+.dash > .charts + section {
+  margin-top: 32px;
+}
+
+.dash h1 {
+  font-size: 32px;
+  line-height: 1.15;
+}
+
+.dash .section-head {
+  align-items: baseline;
+}
+
+.dash .section-head a.sub:hover {
+  color: var(--ink);
+}
+
+.blank {
+  max-width: 56ch;
+  padding: 48px 0;
+}
+
+.blank p {
+  margin-top: 12px;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+.foot-note {
+  margin-top: 32px;
+}
+
+/* the numbers the page leads with: no boxes, a rule between them */
+
+.figures {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  margin: 0 0 32px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.figures > div {
+  padding: 16px 16px 16px 0;
+}
+
+.figures > div + div {
+  padding-left: 16px;
+  border-left: 1px solid var(--line);
+}
+
+.figures dt {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.figures dd {
+  margin: 4px 0 0;
+  font: 500 32px/1.1 var(--serif);
+  letter-spacing: -0.02em;
+}
+
+.figures small {
+  display: block;
+  margin-top: 4px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.charts {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 48px;
+  align-items: start;
+}
+
+/* sales by day: thin columns on a hairline grid */
+
+.columns {
+  margin-top: 32px;
+  padding-left: 56px;
+}
+
+.columns .plot {
+  position: relative;
+  height: 224px;
+  border-bottom: 1px solid var(--line);
+}
+
+.columns .grid span {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px solid var(--line);
+}
+
+.columns .grid i {
+  position: absolute;
+  right: 100%;
+  top: -10px;
+  padding-right: 12px;
+  font-style: normal;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.columns .cols,
+.columns .axis {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+}
+
+.columns .cols {
+  position: absolute;
+  inset: 0;
+}
+
+.columns .col {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  border-radius: 4px 4px 0 0;
+  outline-offset: -2px;
+}
+
+.columns .col:hover,
+.columns .col:focus-visible {
+  background: var(--wash);
+}
+
+.columns .fill {
+  position: relative;
+  width: min(24px, 56%);
+  min-height: 2px;
+  border-radius: 4px 4px 0 0;
+  background: var(--chart);
+}
+
+.columns .fill b {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  padding-bottom: 4px;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.columns .axis {
+  padding-top: 8px;
+  font-size: 14px;
+  color: var(--muted);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.columns .axis .now {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* top products: ranked bars, the count at the tip */
+
+.ranked {
+  margin-top: 16px;
+}
+
+.ranked li {
+  display: grid;
+  gap: 4px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+  outline-offset: 2px;
+}
+
+.ranked .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ranked .track {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ranked .fill {
+  height: 8px;
+  min-width: 4px;
+  border-radius: 0 4px 4px 0;
+  background: var(--chart);
+}
+
+/* only the best seller carries the green; the rest sit in a neutral step */
+.ranked li + li .fill {
+  background: oklch(0.82 0.01 160);
+}
+
+.ranked b {
+  font-size: 14px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.tip {
+  position: absolute;
+  z-index: 5;
+  display: grid;
+  gap: 0 8px;
+  max-width: 320px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  background: var(--ink);
+  color: oklch(0.99 0.005 150);
+  font-size: 14px;
+  pointer-events: none;
+  box-shadow: 0 8px 24px oklch(0.21 0.012 160 / 0.18);
+}
+
+.tip strong {
+  font-weight: 500;
+}
+
+.tip span {
+  color: oklch(0.82 0.01 160);
+}
+
+/* the ledger: transactions and customers */
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 24px;
+  margin-top: 8px;
+}
+
+.dash .scroll {
+  overflow-x: auto;
+}
+
+.ledger {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.ledger th {
+  padding: 16px 16px 12px 0;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--muted);
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+
+.ledger td {
+  padding: 16px 16px 16px 0;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+
+.ledger th:last-child,
+.ledger td:last-child {
+  padding-right: 0;
+}
+
+.ledger th.num,
+.ledger td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ledger tbody tr {
+  cursor: pointer;
+  transition: background-color 140ms var(--out);
+}
+
+.ledger tbody tr:hover {
+  background: var(--wash);
+}
+
+.ledger td:first-child {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.ledger a {
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.ledger tr:hover a,
+.ledger a:hover {
+  text-decoration: underline;
+}
+
+.ledger .clip {
+  max-width: 400px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ledger .dim,
+.dim {
+  color: var(--muted);
+}
+
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.people .person {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.people .person small {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.people .times {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+/* one transaction */
+
+.back {
+  font-size: 14px;
+}
+
+.back a {
+  color: var(--muted);
+}
+
+.back a::before {
+  content: "\2190\00a0";
+}
+
+.back a:hover {
+  color: var(--ink);
+}
+
+.tx-head {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin-top: 8px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tx-head .face {
+  width: 64px;
+  height: 64px;
+}
+
+.tx-head h1 {
+  font-size: 40px;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.tx-head h1 span {
+  color: var(--muted);
+}
+
+.tx-head .state {
+  margin-left: auto;
+}
+
+.tx {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 400px;
+  gap: 48px;
+  align-items: start;
+  margin-top: 24px;
+}
+
+.tx section + section {
+  margin-top: 32px;
+}
+
+.tx h3 {
+  margin: 24px 0 4px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.steps li {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.steps time,
+.proofs time {
+  font-size: 14px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.steps li > span {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.steps .mark {
+  color: var(--green);
+}
+
+.steps li.minor {
+  color: var(--muted);
+}
+
+.proofs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(208px, 1fr));
+  gap: 32px 24px;
+  margin-top: 24px;
+}
+
+.proofs figure {
+  margin: 0;
+}
+
+.proofs a {
+  display: block;
+  border-radius: 8px;
+}
+
+.proofs img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 5;
+  object-fit: cover;
+  border-radius: 8px;
+  background: var(--wash);
+  outline: 1px solid oklch(0.21 0.012 160 / 0.1);
+  outline-offset: -1px;
+}
+
+.proofs figcaption {
+  margin-top: 8px;
+  font-size: 14px;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+.proofs time {
+  white-space: nowrap;
+}
+
+.tx .lines button {
+  grid-column: 1 / -1;
+  justify-self: start;
+  min-height: 32px;
+  font-size: 14px;
+}
+
+.tx .lines .charge {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.tx .lines .charge select,
+.tx .lines .charge button {
+  min-height: 32px;
+  font-size: 14px;
+}
+
+.tx .lines .charge select {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.tx .lines .note a {
+  font-weight: 500;
+}
+
+.total.small {
+  margin-top: 8px;
+  padding-top: 0;
+  border-top: 0;
+  color: var(--muted);
+}
+
+.total.small .price {
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.numbers {
+  margin: 0;
+}
+
+.numbers > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+
+.numbers dt {
+  color: var(--muted);
+}
+
+.numbers dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.numbers code {
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
 @media (max-width: 1080px) {
+  .charts,
+  .tx {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .figures {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .figures > div,
+  .figures > div + div {
+    padding: 16px 16px 16px 0;
+    border-left: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
   .bar {
     padding: 16px;
     flex-wrap: wrap;
@@ -1226,14 +2244,17 @@ form.register {
     padding-right: 16px;
   }
 
-  /* too narrow for seven columns: the table scrolls in its own box, both ways, and the headings stick to its top */
-  .catalog .scroll {
-    max-height: 64vh;
-    overflow: auto;
+  .footage {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .catalog thead th {
-    top: 0;
+  .bar.app {
+    height: auto;
+    padding: 8px 16px;
+  }
+
+  .bar.app .status {
+    display: none;
   }
 
   .gate {
