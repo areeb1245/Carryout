@@ -55,20 +55,20 @@ function show(name, html) {
 }
 
 function showIdle(kind = "idle") {
-  if (G.source === "none") return show("off", `<h1>Welcome</h1><p class="lede">Turn on the camera and the gate will let you in.</p>`);
-  if (kind === "closer") return show("closer", `<h1>Come a little closer</h1><p class="lede">The gate cannot see your face clearly yet.</p>`);
-  show("idle", `<h1>Look at the camera</h1><p class="lede">If you have been here before, the gate knows you. If not, signing up takes a minute and you only do it once.</p>`);
+  if (G.source === "none") return show("off", `<h1>Entry gate</h1><p class="lede">Turn on the camera to walk in</p>`);
+  if (kind === "closer") return show("closer", `<h1>Come a little closer</h1><p class="lede">Your face is not clear enough yet</p>`);
+  show("idle", `<h1>Look at the camera</h1><p class="lede">Returning shoppers walk straight in. New here? Registering takes a minute, once.</p>`);
 }
 
 function showIn(profile, isNew) {
   const method = esc(profile.method);
   const head = isNew
-    ? `<h1>You're in, ${esc(profile.name.split(" ")[0])}</h1><p class="lede">We charge <strong>${method}</strong> when you walk out and email the invoice to <strong>${esc(profile.email)}</strong>.</p>`
-    : `<h1>Welcome back, ${esc(profile.name.split(" ")[0])}</h1><p class="lede"><strong>${method}</strong> is on file.</p>`;
+    ? `<h1>You're in, ${esc(profile.name.split(" ")[0])}</h1><p class="lede"><strong>${method}</strong> is charged as you leave. Invoice to <strong>${esc(profile.email)}</strong></p>`
+    : `<h1>Welcome back, ${esc(profile.name.split(" ")[0])}</h1><p class="lede"><strong>${method}</strong> on file</p>`;
   const nth = profile.visits + 1;
   const history = !isNew && profile.visits ? `<p class="hint history">Your ${ordinal(nth)} visit.${profile.recent?.length ? ` Last time: ${esc(profile.recent.join(", "))}.` : ""}</p>` : "";
   G.shown = "";
-  show("in", `${head}<p class="in">${TICK}<span>${isNew ? "Take what you like and walk out." : "You're in. Take what you like and walk out."}</span></p>${history}<p class="row"><button type="button" class="quiet" id="next">Next shopper</button></p>`);
+  show("in", `${head}<p class="in">${TICK}<span>${isNew ? "Take what you need and walk out" : "Take what you need and walk out"}</span></p>${history}<p class="row"><button type="button" class="quiet" id="next">Next shopper</button></p>`);
   $("next").onclick = reset;
 }
 
@@ -77,11 +77,11 @@ function showForm(problem = "") {
   const cards = Object.entries(G.config.test_cards).map(([id, label]) => `<option value="${esc(id)}">${esc(label)}</option>`).join("");
   const d = G.draft;
   const head = known
-    ? `<h1>Welcome back, ${esc(known.name.split(" ")[0])}</h1><p class="lede">Add a way to pay and you are in.</p>`
-    : `<h1>First time here?</h1><p class="lede">Register once. After that you just walk in.</p>`;
+    ? `<h1>Welcome back, ${esc(known.name.split(" ")[0])}</h1><p class="lede">Add a way to pay to walk in</p>`
+    : `<h1>First time here?</h1><p class="lede">Register once, then just walk in</p>`;
   const you = known
     ? ""
-    : `<div class="you"><img class="face" src="${esc(G.faceUrl)}" alt="Your face as the gate sees it" width="64" height="64" /><span class="hint">This is how the shop will recognise you.</span></div>
+    : `<div class="you"><img class="face" src="${esc(G.faceUrl)}" alt="Your face as the gate sees it" width="64" height="64" /><span class="hint">How the gate will recognise you</span></div>
        <div class="field"><label for="name">Name</label><input id="name" type="text" autocomplete="name" maxlength="40" value="${esc(d.name ?? "")}" /></div>`;
   const email = known?.email ? "" : `<div class="field"><label for="email">Email for your invoices</label><input id="email" type="email" autocomplete="email" maxlength="120" value="${esc(d.email ?? G.config.services.demo_email ?? "")}" /></div>`;
   G.shown = "";
@@ -92,8 +92,8 @@ function showForm(problem = "") {
       ${you}${email}
       <fieldset class="methods">
         <legend>How you pay when you walk out</legend>
-        <label class="method"><input type="radio" name="method" value="paypal" ${d.method === "card" ? "" : "checked"} /><span>PayPal account</span><small>Approve once in a PayPal window.</small></label>
-        <label class="method"><input type="radio" name="method" value="card" ${d.method === "card" ? "checked" : ""} /><span>Card</span><small>A sandbox test card, saved with PayPal.</small></label>
+        <label class="method"><input type="radio" name="method" value="paypal" ${d.method === "card" ? "" : "checked"} /><span>PayPal account</span><small>Approve once in PayPal</small></label>
+        <label class="method"><input type="radio" name="method" value="card" ${d.method === "card" ? "checked" : ""} /><span>Card</span><small>Sandbox test card, saved with PayPal</small></label>
       </fieldset>
       <div id="card-box" hidden>
         <div class="field"><label for="test-card">Card</label><select id="test-card">${cards}<option value="">Type the card details</option></select></div>
@@ -126,7 +126,7 @@ function showApproving() {
   G.shown = "";
   show(
     "approving",
-    `<h1>Approve in the PayPal window</h1><p class="lede">Sign in with a sandbox buyer account and agree. This screen carries on by itself.</p>
+    `<h1>Approve in the PayPal window</h1><p class="lede">Use a sandbox buyer account. This screen continues on its own</p>
      <p class="row"><a class="button" href="${esc(G.approveUrl)}" target="paypal" rel="opener">Open PayPal again</a><button type="button" class="quiet" id="cancel">Cancel</button></p>`,
   );
   $("cancel").onclick = () => {
@@ -340,7 +340,7 @@ async function useCamera(deviceId = localStorage.getItem("gate-camera") || "") {
       localStorage.removeItem("gate-camera"); // that camera is gone: fall back to any
       return useCamera("");
     }
-    $("lens-note").querySelector("p").textContent = "The camera did not turn on. Allow it in the browser, or use a photo.";
+    $("lens-note").querySelector("p").textContent = "Camera blocked. Allow it in the browser, or use a photo";
     return;
   }
   listCameras();

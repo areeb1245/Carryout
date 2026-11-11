@@ -20,6 +20,8 @@ const PICTURE_SIDE = 384;
 const C = {
   config: null,
   dirty: false,
+  items: [], // the products being edited (see render)
+  open: null, // the key of the product open in the form
   clip: null, // {clip, title, frames, times, width, height}
   n: 0,
   images: new Map(), // frame number -> loaded <img>
@@ -50,8 +52,13 @@ function route() {
   for (const link of document.querySelectorAll(".tabs a")) link.toggleAttribute("aria-current", link.dataset.tab === tab);
   $("products-view").hidden = tab !== "products";
   $("footage-view").hidden = tab !== "footage";
-  if (tab !== "footage" && C.live) stopCapture();
-  if (tab === "footage" && !C.clip) loadClips();
+  if (tab !== "footage") {
+    if (C.live) stopCapture();
+    closePreview();
+    return;
+  }
+  if (!C.clip) loadClips();
+  setMode(C.mode, false);
 }
 window.addEventListener("hashchange", route);
 
@@ -68,76 +75,144 @@ async function loadShop(shop) {
 
 const pictureUrl = (file) => `/api/examples/${encodeURIComponent(C.config.shop)}/${encodeURIComponent(file)}`;
 
-function thumbs(tr) {
-  const cell = tr.querySelector(".pics");
-  cell.innerHTML =
-    tr.examples.map((f, i) => `<button type="button" class="thumb" data-i="${i}" title="Remove this picture"><img src="${pictureUrl(f)}" alt="" width="40" height="40" /></button>`).join("") +
-    (tr.examples.length < 4 ? `<button type="button" class="thumb add" title="Add a picture from a file" aria-label="Add a picture">+</button>` : "");
-  cell.querySelectorAll(".thumb[data-i]").forEach((b) => {
-    b.onclick = () => {
-      tr.examples.splice(Number(b.dataset.i), 1);
-      thumbs(tr);
-      setDirty(true);
-    };
-  });
-  const add = cell.querySelector(".thumb.add");
-  if (add)
-    add.onclick = () => {
-      C.pictureFor = tr;
-      $("picture-file").click();
-    };
-}
+// The products being edited: a working copy of the catalogue's, each with a key that survives until it is saved.
+// The list on the left shows them grouped by section; the form on the right edits the one picked.
+let nextKey = 1;
+const draft = (p) => ({ name: "", prompt: "", price: "", category: "", section: "", author: "", ...p, examples: [...(p.examples ?? [])], key: nextKey++ });
+const where = (p) => [p.category, p.section].filter(Boolean).join(" · ");
+const picked = () => C.items.find((p) => p.key === C.open);
+const priceOf = (p) => (p.price === "" || p.price == null ? "–" : Number(p.price).toFixed(2));
 
-function productRow(p = { name: "", prompt: "", price: "", category: "", section: "", author: "" }) {
-  const tr = document.createElement("tr");
-  if (p.id) tr.dataset.id = p.id;
-  tr.examples = [...(p.examples ?? [])];
-  const cell = (label, value, cls = "") => `<td><input type="text" aria-label="${label}" class="${cls}" value="${esc(value ?? "")}" /></td>`;
-  const more = [...Object.values(p.meta ?? {}), p.cues].filter(Boolean).join(", ");
-  tr.innerHTML =
-    `<td class="pics"></td>` +
-    `<td><input type="text" aria-label="Name" value="${esc(p.name ?? "")}" />${more ? `<small>${esc(more)}</small>` : ""}</td>` +
-    cell("Maker", p.author) + cell("Category", p.category) + cell("Section", p.section) + cell("Camera phrase", p.prompt, "phrase") +
-    `<td><input type="number" aria-label="Price" class="num" min="0" step="0.5" value="${esc(p.price)}" /></td>` +
-    `<td><button type="button" class="icon" aria-label="Remove ${esc(p.name || "product")}">×</button></td>`;
-  tr.querySelector("td:last-child button").onclick = () => {
-    tr.remove();
-    setDirty(true);
-  };
-  thumbs(tr);
-  return tr;
-}
-
-// Rows grouped under "Category, Section" headings, in the order the sections first appear.
 function render(catalog) {
-  const rows = [];
-  const where = (p) => [p.category, p.section].filter(Boolean).join(", ");
-  const order = [...new Set(catalog.products.map(where))];
-  let last = null;
-  for (const p of [...catalog.products].sort((a, b) => order.indexOf(where(a)) - order.indexOf(where(b)))) {
-    if (where(p) !== last) {
-      last = where(p);
-      const head = document.createElement("tr");
-      head.className = "group";
-      head.innerHTML = `<th colspan="8" scope="colgroup">${esc(last || "No category")} <span>${catalog.products.filter((x) => where(x) === last).length}</span></th>`;
-      rows.push(head);
-    }
-    rows.push(productRow(p));
-  }
-  $("products").replaceChildren(...rows);
+  const keep = picked()?.id; // a save re-renders: stay on the product that was open
+  C.items = catalog.products.map(draft);
+  C.open = (C.items.find((p) => p.id && p.id === keep) ?? C.items[0])?.key ?? null;
   $("belongings").value = catalog.belongings.join(", ");
   $("leave-after").value = catalog.leave_after_s ?? 3;
-  filter();
+  renderList();
+  renderEditor();
   countPrompts();
 }
 
+function rowHtml(p) {
+  const pic = p.examples[0] ? `<img src="${pictureUrl(p.examples[0])}" alt="" width="40" height="40" loading="lazy" />` : `<span class="no-pic">${esc((p.name || "?").trim().charAt(0).toUpperCase())}</span>`;
+  const n = p.examples.length;
+  return `<span class="item-pic">${pic}${n > 1 ? `<b>${n}</b>` : ""}</span>
+    <span class="item-main"><strong>${esc(p.name || "New product")}</strong><small>${esc(p.author || where(p) || "No maker")}</small></span>
+    <span class="phrase-tag" title="What SAM 3 is asked to find">${esc((p.prompt || p.name || "").toLowerCase() || "no phrase")}</span>
+    <span class="item-price">${priceOf(p)}</span>`;
+}
+
+// Grouped under "Category · Section" headings, in the order the sections first appear.
+function renderList() {
+  const q = $("filter").value.trim().toLowerCase();
+  const match = (p) => !q || [p.name, p.author, p.category, p.section, p.prompt].join(" ").toLowerCase().includes(q);
+  const order = [...new Set(C.items.map(where))];
+  const groups = order.map((g) => [g, C.items.filter((p) => where(p) === g && match(p))]).filter(([, list]) => list.length);
+  $("products").innerHTML = groups.length
+    ? groups
+        .map(
+          ([g, list]) => `<div class="group"><h3>${esc(g || "No section")}<span>${list.length}</span></h3>${list
+            .map((p) => `<button type="button" class="item" data-key="${p.key}" ${p.key === C.open ? 'aria-current="true"' : ""}>${rowHtml(p)}</button>`)
+            .join("")}</div>`,
+        )
+        .join("")
+    : `<p class="empty">${q ? "No product matches the search." : "No products yet. Add one, or pick one out of footage."}</p>`;
+}
+
+function refreshRow(p) {
+  const row = $("products").querySelector(`.item[data-key="${p.key}"]`);
+  if (row) row.innerHTML = rowHtml(p);
+}
+
+$("products").addEventListener("click", (e) => {
+  const row = e.target.closest(".item");
+  if (!row) return;
+  C.open = Number(row.dataset.key);
+  for (const r of $("products").querySelectorAll(".item")) r.toggleAttribute("aria-current", r === row);
+  renderEditor();
+});
+
+const FIELDS = [
+  ["name", "Name", "text", "span"],
+  ["author", "Maker", "text", ""],
+  ["price", "Price", "number", ""],
+  ["category", "Category", "text", ""],
+  ["section", "Section", "text", ""],
+  ["prompt", "Camera phrase", "text", "span"],
+];
+
+function renderEditor() {
+  const p = picked();
+  const form = $("editor");
+  if (!p) {
+    form.innerHTML = `<p class="empty">Pick a product</p>`;
+    return;
+  }
+  const more = [...Object.values(p.meta ?? {}), p.cues].filter(Boolean).join(", ");
+  const pics = p.examples.map((f, i) => `<button type="button" class="thumb big" data-i="${i}" title="Remove this picture"><img src="${pictureUrl(f)}" alt="" /></button>`).join("");
+  form.innerHTML = `
+    <div class="section-head"><h2>${esc(p.name || "New product")}</h2><button type="button" class="quiet danger" id="remove-product">Remove</button></div>
+    <div class="views">
+      <h3>Pictures <span class="sub">${p.examples.length} of 4</span></h3>
+      <div class="pics">${pics}${p.examples.length < 4 ? `<button type="button" class="thumb big add" id="add-picture" title="Add a picture from a file" aria-label="Add a picture"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>` : ""}</div>
+      <p class="hint">Used to confirm what shoppers pick up</p>
+    </div>
+    <div class="form-grid">
+      ${FIELDS.map(
+        ([k, label, type, cls]) => `<div class="field ${cls}"><label for="f-${k}">${label}</label><input id="f-${k}" data-k="${k}" type="${type}" ${type === "number" ? 'min="0" step="0.5" inputmode="decimal" class="num"' : ""} autocomplete="off" value="${esc(p[k] ?? "")}" /></div>`,
+      ).join("")}
+    </div>
+    <p class="hint">Camera phrase: what SAM 3 looks for. Products that share one are told apart by their printed text</p>
+    ${more ? `<p class="details"><span>Details</span>${esc(more)}</p>` : ""}`;
+  form.querySelectorAll(".thumb[data-i]").forEach((b) => {
+    b.onclick = () => {
+      p.examples.splice(Number(b.dataset.i), 1);
+      changed(p, true);
+    };
+  });
+  const add = $("add-picture");
+  if (add)
+    add.onclick = () => {
+      C.pictureFor = p;
+      $("picture-file").click();
+    };
+  $("remove-product").onclick = () => {
+    const i = C.items.indexOf(p);
+    C.items.splice(i, 1);
+    C.open = (C.items[i] ?? C.items[i - 1])?.key ?? null;
+    renderList();
+    renderEditor();
+    setDirty(true);
+  };
+}
+
+$("editor").addEventListener("input", (e) => {
+  const p = picked();
+  const k = e.target.dataset.k;
+  if (!p || !k) return;
+  p[k] = e.target.value;
+  if (k === "name") $("editor").querySelector(".section-head h2").textContent = p.name || "New product";
+  if (k === "category" || k === "section") renderList();
+  else refreshRow(p);
+  setDirty(true);
+});
+$("editor").addEventListener("submit", (e) => e.preventDefault());
+
+// a picture added or removed: the form and the row both show it
+function changed(p, editor) {
+  refreshRow(p);
+  if (editor) renderEditor();
+  setDirty(true);
+}
+
 function readCatalog() {
-  const products = [...$("products").querySelectorAll("tr:not(.group)")]
-    .map((tr, i) => {
-      const [name, author, category, section, prompt, price] = [...tr.querySelectorAll("input")].map((el) => el.value.trim());
-      const old = C.config.catalog.products.find((p) => p.id === tr.dataset.id) ?? {};
+  const products = C.items
+    .map((p, i) => {
+      const { key, ...rest } = p;
+      const [name, author, category, section, prompt] = [p.name, p.author, p.category, p.section, p.prompt].map((v) => String(v ?? "").trim());
       // with no phrase given, the camera looks for the product by its name
-      return { ...old, id: tr.dataset.id || `p${Date.now().toString(36)}${i}`, name: name || prompt, author, category, section, prompt: (prompt || name).toLowerCase(), price: Number(price) || 0, examples: tr.examples };
+      return { ...rest, id: p.id || (p.id = `p${Date.now().toString(36)}${i}`), name: name || prompt, author, category, section, prompt: (prompt || name).toLowerCase(), price: Number(p.price) || 0, examples: [...p.examples] };
     })
     .filter((p) => p.prompt);
   const belongings = $("belongings").value.split(",").map((s) => s.trim()).filter(Boolean);
@@ -146,36 +221,23 @@ function readCatalog() {
 
 function countPrompts() {
   const c = readCatalog();
-  const n = 3 + new Set(c.products.map((p) => p.prompt)).size + c.belongings.length;
+  const phrases = new Set(c.products.map((p) => p.prompt));
+  const n = 3 + phrases.size + c.belongings.length;
+  const max = C.config.max_prompts || n;
   const pictures = c.products.reduce((sum, p) => sum + (p.examples?.length ?? 0), 0);
-  $("count").textContent = `${plural(c.products.length, "product")}, ${plural(pictures, "picture")}`;
+  const sections = new Set(c.products.map(where)).size;
+  $("count").textContent = `${plural(c.products.length, "product")} · ${plural(sections, "section")} · ${plural(pictures, "picture")}`;
+  $("prompt-n").textContent = `${n} of ${max} a frame`;
+  $("prompt-bar").style.width = `${Math.min(100, (n / max) * 100).toFixed(1)}%`;
+  $("prompt-bar").classList.toggle("over", n > max);
   $("prompt-count").textContent =
-    `${n} phrases a frame, with person, hand and "item held in hand". Products that share a phrase (every book is "book") are told apart by their printed text.` +
-    (n > C.config.max_prompts ? ` Over ${C.config.max_prompts} needs a second request per frame, which halves the frame rate.` : "");
-}
-
-function filter() {
-  const q = $("filter").value.trim().toLowerCase();
-  let head = null;
-  let shown = 0;
-  for (const tr of $("products").children) {
-    if (tr.classList.contains("group")) {
-      if (head) head.hidden = !shown;
-      head = tr;
-      shown = 0;
-      continue;
-    }
-    const text = [...tr.querySelectorAll("input")].map((el) => el.value).join(" ").toLowerCase();
-    tr.hidden = q && !text.includes(q);
-    if (!tr.hidden) shown++;
-  }
-  if (head) head.hidden = !shown;
+    `3 base, ${phrases.size} product, ${c.belongings.length} own-item` + (n > max ? `. Over ${max} halves the frame rate` : "");
 }
 
 function setDirty(on) {
   C.dirty = on;
   $("save").disabled = !on;
-  $("note").textContent = on ? "Unsaved changes. They apply on the next Start after saving." : "";
+  $("note").textContent = on ? "Unsaved changes" : "";
   if (C.config) countPrompts();
 }
 
@@ -189,7 +251,7 @@ async function save(catalog = readCatalog()) {
   C.config.catalog = body.catalog;
   render(body.catalog);
   setDirty(false);
-  $("note").textContent = "Saved. It applies the next time the floor presses Start.";
+  $("note").textContent = "Saved. Applies from the next Start";
   return true;
 }
 
@@ -213,28 +275,31 @@ async function upload(blob) {
 
 $("picture-file").onchange = async () => {
   const file = $("picture-file").files[0];
-  const tr = C.pictureFor;
+  const p = C.pictureFor;
   $("picture-file").value = "";
-  if (!file || !tr) return;
+  if (!file || !p) return;
   try {
-    tr.examples.push(await upload(await toJpeg(await createImageBitmap(file))));
-    thumbs(tr);
-    setDirty(true);
+    p.examples.push(await upload(await toJpeg(await createImageBitmap(file))));
+    changed(p, p === picked());
   } catch (e) {
     $("note").textContent = `The picture could not be added: ${e.message}`;
   }
 };
 $("add-product").onclick = () => {
-  const row = productRow();
-  $("products").prepend(row);
-  row.querySelectorAll("input")[0].focus();
+  const now = picked();
+  const p = draft({ category: now?.category ?? "", section: now?.section ?? "" }); // most new products join the section on screen
+  C.items.splice(now ? C.items.indexOf(now) + 1 : 0, 0, p);
+  C.open = p.key;
+  $("filter").value = "";
+  renderList();
+  renderEditor();
+  $("products").querySelector(`.item[data-key="${p.key}"]`)?.scrollIntoView({ block: "nearest" });
+  $("f-name").focus();
   setDirty(true);
 };
 $("save").onclick = () => save();
-$("products-view").addEventListener("input", (e) => {
-  if (e.target.id === "filter") return filter();
-  setDirty(true);
-});
+$("filter").addEventListener("input", renderList);
+for (const id of ["belongings", "leave-after"]) $(id).addEventListener("input", () => setDirty(true));
 $("shop").onchange = async () => {
   if (C.dirty && !confirm("Leave this shop without saving its changes?")) {
     $("shop").value = C.config.shop;
@@ -367,7 +432,7 @@ function strip() {
   }
 }
 
-const COLOURS = ["#3b82f6", "#f59e0b", "#10b981", "#a855f7", "#06b6d4", "#ec4899", "#84cc16", "#f97316"];
+const COLOURS = ["#5b8cff", "#ffb547", "#2fd4a7", "#b98cff", "#ff6f91", "#4fd1ff", "#9be15d", "#ff8a4c"];
 const hue = (label) => COLOURS[[...label].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7) % COLOURS.length];
 
 function outline(ctx, polys, W, H) {
@@ -388,6 +453,7 @@ function draw() {
   const H = canvas.height;
   ctx.clearRect(0, 0, W, H);
   if (C.live) return drawLive(ctx, W, H);
+  if (C.mode === "camera") return;
   const img = C.clip && frameImage(C.n);
   if (!img?.complete) return;
   ctx.drawImage(img, 0, 0, W, H);
@@ -404,14 +470,14 @@ function draw() {
     ctx.strokeStyle = c;
     ctx.stroke();
   }
-  ctx.font = `500 ${12 * px}px "Instrument Sans", system-ui, sans-serif`;
+  ctx.font = `500 ${12 * px}px "Switzer", system-ui, sans-serif`;
   ctx.textBaseline = "middle";
   for (const d of dets) {
     const text = `${d.label} ${Math.round(d.score * 100)}`;
     const w = ctx.measureText(text).width + 10 * px;
     const x = Math.min(d.box[0] * W, W - w - 2);
     const y = Math.max(0, d.box[1] * H - 18 * px);
-    ctx.fillStyle = "rgba(22,21,19,0.8)";
+    ctx.fillStyle = "rgba(13,15,21,0.8)";
     ctx.fillRect(x, y, w, 18 * px);
     ctx.fillStyle = "#fff";
     ctx.fillText(text, x + 5 * px, y + 9 * px);
@@ -561,7 +627,7 @@ function renderPick() {
   const sel = C.sel;
   const pane = $("pick");
   if (!sel) {
-    pane.innerHTML = `<p class="empty">Nothing picked yet. Click an outline on the frame, or drag a box round an object.</p>`;
+    pane.innerHTML = `<p class="empty">Click an outline, or drag a box round an object</p>`;
     return;
   }
   const d = C.described ?? {};
@@ -740,40 +806,126 @@ async function addPicture(id, say) {
   }
 }
 
-// ---------------------------------------------------------------- hold to camera
+// ---------------------------------------------------------------- camera or video
 
-async function listCams() {
-  const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput" && d.label);
-  const before = localStorage.getItem("catalogue-camera") || "";
-  $("cam-pick").innerHTML = cams.map((d) => `<option value="${esc(d.deviceId)}">${esc(d.label)}</option>`).join("");
-  if (cams.some((d) => d.deviceId === before)) $("cam-pick").value = before;
-  $("cam-pick").hidden = cams.length < 2;
+// The footage tab has two sources: the device camera (live preview, record a product) and video (samples, imports).
+C.mode = localStorage.getItem("catalogue-source") === "video" ? "video" : "camera";
+C.preview = null; // the camera stream while the preview is open
+C.previewToken = 0;
+
+const frameNote = (text) => {
+  $("frame-note").hidden = !text;
+  $("frame-note").textContent = text || "";
+};
+
+function fitFrame(w, h) {
+  $("frame").width = w;
+  $("frame").height = h;
+  $("frame-box").style.aspectRatio = `${w} / ${h}`;
 }
 
-async function startCapture() {
+function setMode(mode, remember = true) {
+  C.mode = mode;
+  if (remember) localStorage.setItem("catalogue-source", mode);
+  const cam = mode === "camera";
+  $("src-camera").setAttribute("aria-pressed", String(cam));
+  $("src-video").setAttribute("aria-pressed", String(!cam));
+  $("camera-tools").hidden = !cam;
+  $("video-tools").hidden = cam;
+  $("scrub").hidden = $("strip").hidden = cam;
+  $("frame-box").classList.toggle("previewing", cam);
+  $("reel-hint").textContent = cam ? "Hold one product up to the camera, then press Record product" : "Click an outline, or drag a box round anything it missed";
+  if (cam) {
+    capture("");
+    openPreview();
+  } else {
+    closePreview();
+    if (C.clip) {
+      fitFrame(C.clip.width, C.clip.height);
+      showFrame(C.n);
+    } else frameNote("Choose footage, or import a video of the products");
+  }
+  draw();
+}
+
+async function listCams(current) {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+  const pick = $("cam-pick");
+  const want = [current, pick.value, localStorage.getItem("catalogue-camera")].find((id) => id && cams.some((d) => d.deviceId === id));
+  // names only come through once the browser has been allowed to use a camera
+  pick.innerHTML = cams.length
+    ? cams.map((d, i) => `<option value="${esc(d.deviceId)}">${esc(d.label || `Camera ${i + 1}`)}</option>`).join("")
+    : `<option value="">No camera</option>`;
+  if (want) pick.value = want;
+}
+
+async function openPreview() {
+  if (C.live || C.preview || C.mode !== "camera" || $("footage-view").hidden) return;
+  if (!navigator.mediaDevices?.getUserMedia) return frameNote("This browser cannot open a camera. Choose Video to use footage");
+  const token = ++C.previewToken;
   const id = $("cam-pick").value || localStorage.getItem("catalogue-camera") || "";
+  frameNote("Opening the camera");
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { ...(id ? { deviceId: { exact: id } } : {}), width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
   } catch (e) {
-    return capture(`The camera could not be opened: ${e.message}`);
+    if (token !== C.previewToken) return;
+    if (e.name === "OverconstrainedError" && id) {
+      localStorage.removeItem("catalogue-camera");
+      $("cam-pick").value = "";
+      return openPreview();
+    }
+    listCams().catch(() => {});
+    return frameNote(
+      e.name === "NotAllowedError"
+        ? "Camera access is blocked. Allow it in the browser, or choose Video"
+        : e.name === "NotFoundError"
+          ? "No camera found. Choose Video to use footage"
+          : `The camera could not be opened: ${e.message}`,
+    );
   }
-  listCams();
-  const meta = await (await fetch("/api/clips/live", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: `Camera, ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` }) })).json();
+  if (token !== C.previewToken || C.mode !== "camera" || $("footage-view").hidden) return stream.getTracks().forEach((t) => t.stop());
+  C.preview = stream;
   const cam = $("cam");
   cam.srcObject = stream;
   cam.hidden = false;
-  await cam.play();
+  await cam.play().catch(() => {});
+  fitFrame(cam.videoWidth || 1280, cam.videoHeight || 720);
+  frameNote("");
+  draw();
+  await listCams(stream.getVideoTracks()[0]?.getSettings().deviceId).catch(() => {});
+  if ($("cam-pick").value) localStorage.setItem("catalogue-camera", $("cam-pick").value);
+}
+
+function closePreview() {
+  C.previewToken++;
+  if (C.live) return;
+  C.preview?.getTracks().forEach((t) => t.stop());
+  C.preview = null;
+  $("cam").hidden = true;
+  $("cam").srcObject = null;
+}
+
+// ---------------------------------------------------------------- record a product
+
+async function startCapture() {
+  if (!C.preview) await openPreview();
+  const stream = C.preview;
+  if (!stream) return;
+  const r = await fetch("/api/clips/live", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: `Camera, ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` }) });
+  const meta = await r.json();
+  if (!r.ok) return capture(meta.error || "Could not start recording");
+  const cam = $("cam");
   C.clip = null;
   select(null);
   C.live = { clip: meta.clip, stream, kept: [], latest: null, t0: performance.now(), busy: false };
-  $("frame").width = cam.videoWidth;
-  $("frame").height = cam.videoHeight;
-  $("frame-box").style.aspectRatio = `${cam.videoWidth} / ${cam.videoHeight}`;
-  $("frame-note").hidden = true;
-  $("scrub").hidden = $("strip").hidden = true;
+  fitFrame(cam.videoWidth, cam.videoHeight);
+  frameNote("");
   $("hold").textContent = "Done";
-  capture("Hold the product up to the camera and turn it slowly, so every side is seen.");
+  $("cam-pick").disabled = $("src-video").disabled = true;
+  $("frame-box").classList.add("recording");
+  capture("Turn the product slowly so every side is seen");
   C.live.timer = setInterval(snap, CAPTURE_EVERY_MS);
 }
 
@@ -834,12 +986,12 @@ function drawLive(ctx, W, H) {
   ctx.strokeStyle = c;
   ctx.stroke();
   const text = `${d.label} ${Math.round(d.score * 100)}`;
-  ctx.font = `500 ${14 * px}px "Instrument Sans", system-ui, sans-serif`;
+  ctx.font = `500 ${14 * px}px "Switzer", system-ui, sans-serif`;
   ctx.textBaseline = "middle";
   const w = ctx.measureText(text).width + 12 * px;
   const x = Math.min(d.box[0] * W, W - w - 2);
   const y = Math.max(0, d.box[1] * H - 22 * px);
-  ctx.fillStyle = "rgba(22,21,19,0.8)";
+  ctx.fillStyle = "rgba(13,15,21,0.8)";
   ctx.fillRect(x, y, w, 22 * px);
   ctx.fillStyle = "#fff";
   ctx.fillText(text, x + 6 * px, y + 11 * px);
@@ -863,19 +1015,21 @@ async function stopCapture() {
   if (!live) return;
   clearInterval(live.timer);
   C.live = null;
-  live.stream.getTracks().forEach((t) => t.stop());
-  $("cam").hidden = true;
-  $("cam").srcObject = null;
-  $("hold").textContent = "Hold to camera";
-  $("scrub").hidden = $("strip").hidden = false;
+  $("hold").textContent = "Record product";
+  $("cam-pick").disabled = $("src-video").disabled = false;
+  $("frame-box").classList.remove("recording");
   if (!live.kept.length) {
     // still show what was filmed: a box dragged round the item on any frame works as well
     await loadClips();
     const filmed = C.clips.find((c) => c.clip === live.clip)?.frames;
     if (filmed) {
+      setMode("video", false);
       $("clip").value = live.clip;
       await openClip(live.clip);
-    } else draw();
+    } else {
+      if ($("footage-view").hidden) closePreview();
+      draw();
+    }
     capture(
       filmed
         ? `No item in hand was outlined in ${plural(filmed, "frame")}. Drag a box round it on a frame, or type what it is in "Also look for" and try again.`
@@ -885,6 +1039,7 @@ async function stopCapture() {
     );
     return;
   }
+  setMode("video", false);
   await finishCapture(live.clip, live.kept);
 }
 
@@ -917,8 +1072,15 @@ async function finishCapture(clip, kept) {
 }
 
 $("hold").onclick = () => (C.live ? stopCapture() : startCapture());
-$("cam-pick").onchange = () => localStorage.setItem("catalogue-camera", $("cam-pick").value);
-navigator.mediaDevices?.enumerateDevices && listCams().catch(() => {});
+$("cam-pick").onchange = () => {
+  localStorage.setItem("catalogue-camera", $("cam-pick").value);
+  closePreview();
+  openPreview();
+};
+$("src-camera").onclick = () => C.mode !== "camera" && setMode("camera");
+$("src-video").onclick = () => C.mode !== "video" && setMode("video");
+navigator.mediaDevices?.addEventListener?.("devicechange", () => listCams().catch(() => {}));
+listCams().catch(() => {});
 
 // ---------------------------------------------------------------- start
 

@@ -209,6 +209,7 @@ class Session:
             result, round_trip = await task
         except Exception as e:  # this frame is lost; the timeline simply has one sample fewer
             return {"seq": seq, "t": t, "error": str(e) or type(e).__name__}
+        work0 = time.perf_counter()
         frame = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
         state = self.engine.step(t, result, frame)
         self.frames_seen += 1
@@ -231,7 +232,8 @@ class Session:
         self._read_shelf(t, frame, state)
         state["events"] = state["events"] + self.engine.events[first:]
         state["seq"] = seq
-        state["ms"] = {"model": result.get("ms"), "round_trip": round(round_trip)}
+        # model: SAM on the GPU; round_trip: the call to it, network included; work: this frame's tracking here after
+        state["ms"] = {"model": result.get("ms"), "round_trip": round(round_trip), "work": round((time.perf_counter() - work0) * 1000)}
         state["meta"] = self.meta()
         if with_zone:
             state["zone"] = self.engine.zone_outline()

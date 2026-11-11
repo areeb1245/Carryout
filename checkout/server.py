@@ -467,7 +467,7 @@ MAX_CLIP_BYTES = 300 * 1024 * 1024
 
 @app.get("/catalogue")
 async def catalogue_page():
-    return FileResponse(WEB / "catalogue.html")
+    return FileResponse(WEB / "catalogue.html", headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/examples/{shop}")

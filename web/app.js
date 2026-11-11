@@ -10,7 +10,7 @@ import { TICK, clockTime, dayOf, describe as describeEvent, esc, lineNote, money
 
 const $ = (id) => document.getElementById(id);
 mountShell("floor");
-const PALETTE = ["#3b82f6", "#f59e0b", "#10b981", "#a855f7", "#06b6d4", "#ec4899", "#84cc16", "#f97316"];
+const PALETTE = ["#5b8cff", "#ffb547", "#2fd4a7", "#b98cff", "#ff6f91", "#4fd1ff", "#9be15d", "#ff8a4c"];
 const VIEW_WIDTH = 960; // the picture on screen; frames sent for analysis may be wider (catalogue's frame_width)
 
 const S = {
@@ -72,6 +72,53 @@ async function loadShop(shop) {
   rememberShop(S.config.shop);
   $("shop").innerHTML = S.config.shops.map((x) => `<option value="${esc(x.id)}" ${x.id === S.config.shop ? "selected" : ""}>${esc(x.name)}</option>`).join("");
   fillSources();
+  renderPrompts();
+}
+
+// ---------------------------------------------------------------- what SAM 3 is asked, and what it found
+
+// The phrases sent with every frame (catalog.frame_prompts on the server): a person, a hand, anything held, and one
+// phrase per product or family. A phrase lights up while something it found is on screen.
+const BASE_PROMPTS = ["person", "hand", "item held in hand"];
+
+function renderPrompts() {
+  const products = S.config?.catalog.products ?? [];
+  S.promptOf = new Map(products.map((p) => [p.id, (p.prompt || "").toLowerCase()]));
+  const own = (S.config?.catalog.belongings ?? []).map((p) => p.toLowerCase());
+  const phrases = [...new Set([...BASE_PROMPTS, ...products.map((p) => (p.prompt || "").toLowerCase()).filter(Boolean), ...own])];
+  $("prompts").innerHTML = phrases.map((p) => `<li data-p="${esc(p)}">${esc(p)}</li>`).join("");
+  S.hudAt = 0;
+}
+
+const fmt = (n, digits = 0) => (n == null || Number.isNaN(n) ? "–" : n.toFixed(digits));
+
+// The readout above the picture, refreshed a few times a second rather than every painted frame.
+function hud(people, hands, items, t) {
+  const now = performance.now();
+  if (now - (S.hudAt || 0) < 250) return;
+  S.hudAt = now;
+  const here = people.filter((p) => p.alpha >= 0.5);
+  const held = items.filter((i) => i.state === "held" && i.alpha >= 0.5);
+  const rest = items.filter((i) => i.state === "rest" && i.alpha >= 0.5);
+  const scored = items.filter((i) => i.alpha >= 0.5 && i.score != null);
+  const sent = S.sentTimes.filter((x) => now - x < 5000).length / 5;
+  $("hud-ms").textContent = S.modelMs == null ? "–" : `${fmt(S.modelMs)} ms`;
+  $("hud-trip").textContent = S.tripMs == null ? "–" : `${fmt(S.tripMs)} ms`;
+  $("hud-fps").textContent = `${fmt(sent, 1)}/s`;
+  const live = $("live-view")?.checked ?? true;
+  $("hud-delay").previousElementSibling.textContent = live ? "Mask age" : "Delay";
+  $("hud-delay").textContent = live ? `${fmt(S.maskAge, 1)} s` : `${fmt(S.delay, 1)} s`;
+  $("hud-people").textContent = String(here.length);
+  $("hud-held").textContent = String(held.length);
+  $("hud-shelf").textContent = S.meta.shelf ? `${S.meta.shelf.read} of ${S.meta.shelf.items} read` : String(rest.length);
+  $("hud-score").textContent = scored.length ? `${Math.round((scored.reduce((s, i) => s + i.score, 0) / scored.length) * 100)}%` : "–";
+  $("live-time").textContent = S.kind === "camera" ? clockTime(S.wall0 + t * 1000) : stamp(t);
+  const found = new Set();
+  if (here.length) found.add("person");
+  if (hands?.length) found.add("hand");
+  if (held.length) found.add("item held in hand");
+  for (const i of items) if (i.alpha >= 0.5 && i.product && S.promptOf?.get(i.product)) found.add(S.promptOf.get(i.product));
+  for (const li of $("prompts").children) li.classList.toggle("hit", found.has(li.dataset.p));
 }
 
 // The footage list: a live camera, this shop's sample clips, or a video file.
@@ -139,7 +186,7 @@ function wake(quiet = false) {
   const text = $("model-text");
   if (!quiet) {
     dot.className = "dot";
-    text.textContent = "Starting the vision model (up to a minute)";
+    text.textContent = "Starting SAM 3 (up to a minute)";
   }
   waking = (async () => {
     try {
@@ -147,11 +194,11 @@ function wake(quiet = false) {
       if (!r.ok) throw new Error((await r.json()).error);
       warmAt = performance.now();
       dot.className = "dot ok";
-      text.textContent = "Cameras ready";
+      text.textContent = "SAM 3 ready";
       return true;
     } catch (e) {
       dot.className = "dot bad";
-      text.textContent = `Vision model unavailable: ${e.message}`;
+      text.textContent = `SAM 3 unavailable: ${e.message}`;
       return false;
     } finally {
       waking = null;
@@ -168,7 +215,7 @@ setInterval(() => {
   if (now - usedAt < STAY_WARM_FOR) wake(true);
   else if (now - warmAt > WARM_FOR + 60000 && $("model-dot").className === "dot ok") {
     $("model-dot").className = "dot off";
-    $("model-text").textContent = "Vision model idle. Press Start to resume";
+    $("model-text").textContent = "SAM 3 idle. Press Start to wake it";
   }
 }, 30000);
 
@@ -264,6 +311,9 @@ async function start() {
     $("events").classList.toggle("clock", S.kind === "camera"); // a live camera: the activity list shows the time of day
     $("viewer").classList.add("live");
     $("viewer-note").textContent = "";
+    $("live-chip").hidden = false;
+    $("live-chip").classList.remove("done");
+    $("live-label").textContent = S.kind === "camera" ? "Live" : "Analysing";
     button.textContent = "Stop";
     capture();
   } catch (e) {
@@ -305,6 +355,10 @@ function openSocket() {
         S.latencies.push(clock() - msg.t);
         if (S.latencies.length > 12) S.latencies.shift();
         S.modelMs = msg.ms?.model ?? S.modelMs;
+        S.tripMs = msg.ms?.round_trip ?? S.tripMs;
+        S.workMs = msg.ms?.work ?? S.workMs;
+        S.lagMs = (clock() - msg.t) * 1000; // from the frame being sent to its answer arriving
+        msg.arrived = performance.now();
         S.states.push(msg);
       }
       S.inbox.push(msg);
@@ -321,6 +375,8 @@ function end() {
   stopMedia();
   if (S.ws?.readyState === 1) S.ws.send(JSON.stringify({ type: "end" }));
   $("start").textContent = "Start again";
+  $("live-chip").classList.add("done");
+  $("live-label").textContent = "Stopped";
 }
 
 function stopMedia() {
@@ -431,9 +487,9 @@ function between(listA, listB, k) {
       } else polygons = movePolys(o.polygons, o.box, box);
       out.push({ ...o, box, polygons, alpha: 1 });
       inB.delete(o.id);
-    } else out.push({ ...o, alpha: listB ? 1 - k : 1 });
+    } else out.push({ ...o, alpha: listB ? Math.max(0, 1 - k) : 1 });
   }
-  for (const o of inB.values()) out.push({ ...o, alpha: k });
+  for (const o of inB.values()) out.push({ ...o, alpha: Math.min(1, k) });
   return out;
 }
 
@@ -450,7 +506,7 @@ function spineLabel(text, box, W, H, px) {
   const bw = (box[2] - box[0]) * W;
   const bh = (box[3] - box[1]) * H;
   const along = Math.max(bw, bh);
-  ctx.font = `500 ${10 * px}px "Instrument Sans", ui-sans-serif, system-ui, sans-serif`;
+  ctx.font = `500 ${10 * px}px "Switzer", ui-sans-serif, system-ui, sans-serif`;
   let label = text;
   while (label.length > 4 && ctx.measureText(label).width > along - 10 * px) label = label.slice(0, -2);
   if (label !== text) label = label.trimEnd() + "…";
@@ -459,7 +515,7 @@ function spineLabel(text, box, W, H, px) {
   ctx.save();
   ctx.translate(((box[0] + box[2]) / 2) * W, ((box[1] + box[3]) / 2) * H);
   if (bh > bw) ctx.rotate(-Math.PI / 2);
-  ctx.fillStyle = "rgba(22,21,19,0.78)";
+  ctx.fillStyle = "rgba(13,15,21,0.78)";
   ctx.beginPath();
   ctx.roundRect(-tw / 2, -th / 2, tw, th, 3 * px);
   ctx.fill();
@@ -471,7 +527,7 @@ function spineLabel(text, box, W, H, px) {
 }
 
 function chip(text, x, y, bg, px) {
-  ctx.font = `500 ${13 * px}px "Instrument Sans", ui-sans-serif, system-ui, sans-serif`;
+  ctx.font = `500 ${13 * px}px "Switzer", ui-sans-serif, system-ui, sans-serif`;
   const w = ctx.measureText(text).width + 14 * px;
   const h = 22 * px;
   x = Math.max(4 * px, Math.min(x, canvas.width - w - 4 * px));
@@ -489,7 +545,7 @@ function chip(text, x, y, bg, px) {
 // A small label for something in a shopper's hands: a bar in the shopper's colour, a tick once it is sure, the name.
 // It is moved down past any label already `placed` there, and returns where it ended up.
 function tag(text, sure, x, y, bar, px, placed) {
-  ctx.font = `500 ${12 * px}px "Instrument Sans", ui-sans-serif, system-ui, sans-serif`;
+  ctx.font = `500 ${12 * px}px "Switzer", ui-sans-serif, system-ui, sans-serif`;
   if (text.length > 34) text = text.slice(0, 32).trimEnd() + "…";
   const tick = sure ? 14 * px : 0;
   const w = ctx.measureText(text).width + 17 * px + tick;
@@ -499,7 +555,7 @@ function tag(text, sure, x, y, bar, px, placed) {
   const hits = (r) => x < r.x + r.w && r.x < x + w && y < r.y + r.h + 2 * px && r.y < y + h + 2 * px;
   for (let tries = 0; tries < 12 && placed.some(hits); tries++) y += h + 2 * px;
   y = Math.min(y, canvas.height - h - 4 * px);
-  ctx.fillStyle = "rgba(22,21,19,0.84)";
+  ctx.fillStyle = "rgba(13,15,21,0.84)";
   ctx.beginPath();
   ctx.roundRect(x, y, w, h, 4 * px);
   ctx.fill();
@@ -508,7 +564,7 @@ function tag(text, sure, x, y, bar, px, placed) {
   ctx.roundRect(x, y, 4 * px, h, [4 * px, 0, 0, 4 * px]);
   ctx.fill();
   if (sure) {
-    ctx.strokeStyle = "#8fd9b0";
+    ctx.strokeStyle = "#5fe3a1";
     ctx.lineWidth = 1.8 * px;
     ctx.lineCap = ctx.lineJoin = "round";
     ctx.beginPath();
@@ -543,12 +599,12 @@ function liveStamp(t, px) {
   if (S.kind !== "camera") return;
   const at = S.wall0 + t * 1000;
   ctx.globalAlpha = 1;
-  ctx.font = `500 ${13 * px}px "Instrument Sans", ui-sans-serif, system-ui, sans-serif`;
+  ctx.font = `500 ${13 * px}px "Switzer", ui-sans-serif, system-ui, sans-serif`;
   const day = dayOf(at);
   const w = ctx.measureText(`${day}  00:00:00`).width + 16 * px; // sized for the widest digits, so it does not twitch
   const h = 24 * px;
   const x = canvas.width - w - 8 * px;
-  ctx.fillStyle = "rgba(22,21,19,0.72)";
+  ctx.fillStyle = "rgba(13,15,21,0.72)";
   ctx.beginPath();
   ctx.roundRect(x, 8 * px, w, h, 4 * px);
   ctx.fill();
@@ -560,18 +616,70 @@ function liveStamp(t, px) {
   ctx.fillText(clockTime(at), x + w - 8 * px, 8 * px + h / 2 + px * 0.5);
 }
 
+// What to draw at picture time T: people, items and hands.
+//
+// Aligned: the picture runs behind the footage and every outline sits on the frame it was computed from, blended
+// between the analysed frames on either side.
+function alignedScene(T) {
+  let i = -1;
+  for (let k = 0; k < S.states.length; k++) if (S.states[k].t <= T) i = k;
+  while (i > 1) {
+    S.states.shift();
+    i -= 1;
+  }
+  if (i < 0) return null;
+  const a = S.states[i];
+  const b = S.states[i + 1];
+  const k = b ? Math.min(1, Math.max(0, (T - a.t) / Math.max(1e-3, b.t - a.t))) : 0;
+  if (!b && T - a.t > 1.5 && !S.ended) return null; // nothing fresh to show: better no outline than a stale one
+  return { items: between(a.items, b?.items, k), people: between(a.people, b?.people, k), hands: (k < 0.5 || !b ? a : b).hands, age: T - a.t };
+}
+
+// Live: the picture is the footage as it comes, and the outlines are SAM 3's latest, which describe a frame about
+// half a second old. A new answer is blended in over LIVE_BLEND_MS rather than snapped to.
+// Moving outlines on along their recent motion was tried and measured on recorded answers (12 Nov 2026): it made the
+// outlines of items in hand further off, not closer (hands turn back as they pick up and put down), and did not help
+// people. So they stay where SAM 3 last saw them.
+const LIVE_LAG = 0.06; // the newest captured frame, give or take
+const LIVE_BLEND_MS = 180;
+
+function liveScene(T) {
+  const got = S.states.filter((s) => s.t <= T);
+  if (!got.length) return null;
+  const top = got.at(-1);
+  while (S.states.length > 2 && S.states[0].t < top.t) S.states.shift(); // the latest and the one before it are enough
+  const age = T - top.t;
+  if (age > 1.5 && !S.ended) return null; // answers have stopped: better no outline than a stale one
+  const prev = got.at(-2);
+  const k = prev ? Math.min(1, (performance.now() - (top.arrived ?? 0)) / LIVE_BLEND_MS) : 1;
+  return {
+    items: prev ? between(prev.items, top.items, k) : top.items,
+    people: prev ? between(prev.people, top.people, k) : top.people,
+    hands: (k < 0.5 && prev ? prev : top).hands,
+    age,
+  };
+}
+
 function draw() {
   requestAnimationFrame(draw);
   if (!S.running) return;
 
   // how far behind the footage the picture must run to have an analysed frame on both sides of it
+  // It follows the usual answer (three in four), not the slowest: a stray slow one only holds its outline a moment.
+  // It moves in wall time, so a slow screen does not leave it stuck high: up gently (the picture slows, it never
+  // jumps back), down quickly once answers are prompt again.
+  const now = performance.now();
+  const dt = S.delayAt ? Math.min(0.5, (now - S.delayAt) / 1000) : 0;
+  S.delayAt = now;
   if (S.latencies.length >= 2) {
-    const worst = [...S.latencies].sort((a, b) => a - b)[Math.floor(S.latencies.length * 0.85)];
+    const usual = [...S.latencies].sort((a, b) => a - b)[Math.floor(S.latencies.length * 0.75)];
     const gap = S.states.length > 1 ? S.states.at(-1).t - S.states.at(-2).t : 0.5;
-    const want = Math.min(8, Math.max(1.2, worst + gap + 0.25));
-    S.delay = want > S.delay ? want : Math.max(want, S.delay - 0.002);
+    const want = Math.min(8, Math.max(0.9, usual + gap + 0.2));
+    S.delay = want > S.delay ? Math.min(want, S.delay + 0.5 * dt) : Math.max(want, S.delay - 0.6 * dt);
   }
-  const T = clock() - S.delay;
+  // live: the picture as it comes, with SAM 3's latest outlines moved on to where things are now (see scene)
+  const live = $("live-view")?.checked ?? true;
+  const T = clock() - (live ? LIVE_LAG : S.delay);
 
   while (S.inbox.length && S.inbox[0].t <= T) apply(S.inbox.shift());
   if (S.ended && !S.states.some((s) => s.t > T)) while (S.inbox.length) apply(S.inbox.shift());
@@ -594,17 +702,9 @@ function draw() {
   }
   ctx.drawImage(frame.bmp, 0, 0, W, H);
 
-  let i = -1;
-  for (let k = 0; k < S.states.length; k++) if (S.states[k].t <= T) i = k;
-  while (i > 1) {
-    S.states.shift();
-    i -= 1;
-  }
-  if (i < 0) return liveStamp(frame.t, px);
-  const a = S.states[i];
-  const b = S.states[i + 1];
-  const k = b ? Math.min(1, Math.max(0, (T - a.t) / Math.max(1e-3, b.t - a.t))) : 0;
-  if (!b && T - a.t > 1.5 && !S.ended) return liveStamp(frame.t, px); // nothing fresh to show: better no outline than a stale one
+  const sc = live ? liveScene(T) : alignedScene(T);
+  if (!sc) return liveStamp(frame.t, px);
+  S.maskAge = sc.age;
 
   if ($("show-zone").checked && S.zone.length) {
     ctx.setLineDash([6 * px, 6 * px]);
@@ -615,7 +715,7 @@ function draw() {
     ctx.setLineDash([]);
   }
 
-  const items = between(a.items, b?.items, k);
+  const items = sc.items;
   if ($("show-stock").checked) {
     ctx.lineWidth = 1.25 * px;
     for (const item of items) {
@@ -635,7 +735,7 @@ function draw() {
     }
   }
 
-  const people = between(a.people, b?.people, k);
+  const people = sc.people;
   for (const p of people) {
     ctx.globalAlpha = p.alpha;
     path(p.polygons, W, H);
@@ -649,7 +749,7 @@ function draw() {
   if ($("show-hands").checked) {
     ctx.globalAlpha = 1;
     ctx.lineWidth = 1.5 * px;
-    for (const hand of (k < 0.5 || !b ? a : b).hands) {
+    for (const hand of sc.hands) {
       if (hand.person == null) continue;
       ctx.strokeStyle = "#fff";
       path(hand.polygons, W, H);
@@ -685,7 +785,7 @@ function draw() {
   ctx.globalAlpha = 1;
   const placed = [];
   const named = new Set();
-  const hands = (k < 0.5 || !b ? a : b).hands;
+  const hands = sc.hands;
   for (const cart of S.carts) {
     const pid = cart.person;
     if (!people.some((p) => p.id === pid && p.alpha >= 0.5)) continue;
@@ -725,13 +825,9 @@ function draw() {
   }
   liveStamp(frame.t, px);
 
-  const sent = S.sentTimes.filter((t) => performance.now() - t < 5000);
-  S.sentTimes = sent;
-  if (!S.ended)
-    $("meter").textContent =
-      `Watching at ${(sent.length / 5).toFixed(1)} frames a second, ${S.delay.toFixed(1)} s behind the footage` +
-      (S.meta.shelf ? `. ${S.meta.shelf.read} of ${S.meta.shelf.items} items on the shelf identified` : "") +
-      (S.meta.dry ? ". Rehearsal: nobody is charged" : "");
+  S.sentTimes = S.sentTimes.filter((t) => performance.now() - t < 5000);
+  hud(people, hands, items, frame.t);
+  if (!S.ended) $("meter").textContent = S.meta.dry ? "Rehearsal: nobody is charged" : "";
 }
 
 // A state or update whose moment the picture has reached.
@@ -834,7 +930,7 @@ function bagParts(cart) {
   } else if (who.status === "not_registered") {
     sub = `<span class="sub">${who.name ? `Resembles ${esc(who.name)}, match too weak` : "Not registered"}</span>`;
     if (!left)
-      notice = `<p class="notice">${who.name ? `Not sure enough this is ${esc(who.name)}. A clearer view of their face checks them in.` : "This shopper has not registered at the gate."} Nothing will be charged until then. <a href="/gate" target="_blank" rel="noopener">Open the gate</a></p>`;
+      notice = `<p class="notice">${who.name ? `Face match too weak for ${esc(who.name)}.` : "Not registered at the gate."} No charge until confirmed. <a href="/gate" target="_blank" rel="noopener">Open the gate</a></p>`;
   } else sub = `<span class="sub">${left ? "Never recognised" : "Looking for their face"}</span>`;
   const lines = cart.lines
     .map((line) => {
@@ -861,7 +957,7 @@ function renderCarts() {
   S.cartsKey = key;
   const box = $("carts");
   if (!S.carts.length) {
-    box.innerHTML = `<p class="empty">No shoppers in store. Shoppers appear here after entering through the gate.</p>`;
+    box.innerHTML = `<p class="empty">No shoppers yet</p>`;
     return;
   }
   box.querySelector(":scope > .empty")?.remove();
@@ -913,7 +1009,7 @@ function renderEvents() {
   more.hidden = listed.length <= RECENT;
   more.textContent = $("events").classList.contains("all") ? "Show the latest" : `Show all ${listed.length}`;
   if (!listed.length) {
-    $("events").innerHTML = `<li class="empty">${S.only ? "Nothing from this shopper yet." : "Nothing yet. What shoppers take, put back and pay for is listed here."}</li>`;
+    $("events").innerHTML = `<li class="empty">${S.only ? "No activity from this shopper yet" : "No activity yet"}</li>`;
     return;
   }
   $("events").innerHTML = [...listed]
@@ -972,6 +1068,6 @@ setInterval(() => {
   if (S.kind !== "camera" && video.ended && !S.ended) end();
 }, 50);
 
-Object.assign(window, { checkout: S, checkoutDraw: draw }); // for poking at the state from the console
+Object.assign(window, { checkout: S, checkoutDraw: draw, checkoutScene: { live: liveScene, aligned: alignedScene } }); // for poking at the state from the console
 boot().catch((e) => note(`Could not load: ${e.message}`));
 requestAnimationFrame(draw);

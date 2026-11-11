@@ -46,7 +46,7 @@ function overview() {
   const s = D.data.summary;
   const latest = D.data.transactions.filter((t) => !t.rehearsal).slice(0, 5);
   if (!s.transactions && !latest.length)
-    return `<section class="blank"><h1>No sales yet</h1><p>Sales appear here when a shopper leaves with items. Start the camera on the <a href="/">shop floor</a>.</p></section>`;
+    return `<section class="blank"><h1>No sales yet</h1><p>Sales show once a shopper leaves with items. Start the <a href="/">shop floor</a> camera</p></section>`;
   const figure = (label, value, note = "") => `<div><dt>${label}</dt><dd>${value}</dd>${note ? `<small>${note}</small>` : ""}</div>`;
   const others = s.other.map((o) => `${plural(o.transactions, "earlier sale")} in ${esc(o.currency.toUpperCase())} (${moneyIn(o.sales, o.currency)})`).join(", ");
   return `
@@ -377,7 +377,7 @@ async function refund(button) {
 
 function customers() {
   const list = D.data.customers;
-  if (!list.length) return `<section class="blank"><h1>No customers yet</h1><p>Shoppers register at the <a href="/gate" target="_blank" rel="noopener">entry gate</a> with a face scan, an email address and a PayPal payment method.</p></section>`;
+  if (!list.length) return `<section class="blank"><h1>No customers yet</h1><p>Shoppers register at the <a href="/gate" target="_blank" rel="noopener">entry gate</a> with their face, an email and PayPal</p></section>`;
   return `<section>
     <div class="section-head"><h1>Customers</h1><span class="sub">${plural(list.length, "registered shopper")}</span></div>
     <div class="scroll"><table class="ledger people">

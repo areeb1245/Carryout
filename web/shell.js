@@ -29,6 +29,7 @@ const OVERLAYS = [
   ["show-boxes", "Boxes round items in hand", true],
   ["show-stock", "Stock on the shelves", true],
   ["show-zone", "Shelf area", false],
+  ["live-view", "Live picture, no delay", true],
 ];
 
 export function mountShell(page) {
@@ -88,7 +89,7 @@ export function mountShell(page) {
 async function refresh() {
   const me = await (await fetch("/api/staff/me")).json().catch(() => ({}));
   $("sign-out").hidden = !me.signed_in;
-  $("staff-note").textContent = me.signed_in ? "Signed in on this device." : me.sign_in ? "Not signed in." : "Open on this computer: no staff code is set up.";
+  $("staff-note").textContent = me.signed_in ? "Signed in on this device." : me.sign_in ? "Not signed in." : "No staff code set up";
   const config = await (await fetch(`/api/config?shop=${encodeURIComponent(currentShop())}`)).json();
   const sv = config.services;
   const row = (on, name, text) => `<li><span class="dot ${on ? "ok" : "bad"}"></span><span><strong>${name}</strong> ${esc(text)}</span></li>`;
@@ -100,7 +101,7 @@ async function refresh() {
   const n = config.profiles.length;
   $("shopper-count").innerHTML = n
     ? `${n} registered shopper${n === 1 ? "" : "s"}, ${config.profiles.filter((p) => p.inside).length} in the shop. <a href="/dashboard#customers">See them on the dashboard</a>.`
-    : "Nobody has registered yet. Shoppers register at the gate.";
+    : "No shoppers registered yet";
   $("forget").hidden = !n;
 }
 

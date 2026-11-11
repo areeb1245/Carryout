@@ -3,25 +3,28 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>The gate</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231f5c45'/%3E%3Cpath d='M4 5h8l-1 6H5z' fill='none' stroke='%23fff' stroke-width='1.4'/%3E%3C/svg%3E" />
-    <link rel="preload" href="/static/fonts/newsreader-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <meta name="theme-color" content="#f5f6f9" />
+    <link rel="icon" href="/static/mark.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://cdn.fontshare.com" crossorigin />
+    <link rel="preload" href="https://cdn.fontshare.com/wf/HJHZ26OECMTXRH7JXPFC7EVIHDSLT2RA/LJRNLR7WCPF3PY3SZ7B2LHNUTQMFNCHL/4MCJYGQDIOOXHWSIIB2OYNDBEALJSOGN.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/static/styles.css" />
+    <title>Gate</title>
   </head>
-  <body>
-    <header class="bar">
-      <span class="brand" id="brand">Shop</span>
+  <body class="shopper">
+    <header class="gatebar">
+      <span class="brand"><svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" /><path d="M6.5 10V6.5H10M14 6.5h3.5V10M17.5 14v3.5H14M10 17.5H6.5V14" /><rect class="core" x="10" y="10" width="4" height="4" rx="1" /></svg><span id="brand">Shop</span></span>
       <p class="status" role="status"><span class="dot" id="gate-dot"></span><span id="gate-status">Starting the gate</span></p>
     </header>
 
     <main class="gate">
-      <div>
+      <div class="lens-col">
         <div class="lens" id="lens">
           <video id="camera" playsinline muted autoplay></video>
           <img id="photo" alt="The picture the gate is looking at" hidden />
+          <span class="corners" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
           <div class="seen" id="seen"><span id="seen-name"></span></div>
           <div class="lens-note" id="lens-note">
-            <p>The gate needs to see you to let you in.</p>
+            <p>Camera off</p>
             <button type="button" class="primary" id="use-camera">Turn on the camera</button>
           </div>
         </div>
@@ -33,10 +36,17 @@
         </div>
       </div>
 
-      <div class="panel" id="panel" aria-live="polite"></div>
+      <div class="panel-col">
+        <div class="panel" id="panel" aria-live="polite"></div>
+        <ol class="how" aria-label="How it works">
+          <li><b>1</b><span><strong>Face the camera</strong>Register once with PayPal or a card</span></li>
+          <li><b>2</b><span><strong>Take what you need</strong>Cameras keep track of your bag</span></li>
+          <li><b>3</b><span><strong>Walk out</strong>PayPal charges you and emails the invoice</span></li>
+        </ol>
+      </div>
     </main>
 
-    <p class="foot">This is a demo on PayPal's sandbox. Use test details only: no real card is charged and no money moves.</p>
+    <p class="foot">PayPal sandbox demo. Test details only, no real money moves</p>
 
     <script src="/static/gate.js" type="module"></script>
   </body>
