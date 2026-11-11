@@ -1730,9 +1730,10 @@ input[type="search"] {
   top: 80px;
   display: grid;
   gap: 16px;
-  max-height: calc(100vh - 100px);
+  max-height: calc(100vh - 104px);
   overflow-y: auto;
-  overscroll-behavior: contain;
+  /* no overscroll containment: at the top of the page the panel starts below its sticky spot, so its last
+     cards sit under the fold until the page itself scrolls; the wheel has to carry on to the page */
 }
 
 .editor,
