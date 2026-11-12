@@ -313,3 +313,229 @@ def test_one_item_in_hand_never_pays_for_two_lines():
         await verifier.close()
 
     asyncio.run(scenario())
+
+
+def test_the_check_in_steps_takes_off_what_went_back_and_keeps_doubt_for_what_left_unread():
+    """The check before charging as separate questions about separate pictures. A book read in hand and then seen
+    going onto the shelf comes off; one in hand earlier whose title cannot be made out as they leave is unclear (not
+    absent), so a title confirmed on the floor still stands; a book read in their hands as they leave is kept."""
+    import base64
+    import json
+
+    import cv2
+    import httpx
+
+    from checkout.verify import Verifier
+
+    def picture(n):  # each picture is told apart by its height
+        return np.zeros((20 + n, 30, 3), np.uint8)
+
+    views = [(26.9 + 0.66 * n, picture(n)) for n in range(6)]  # pictures 0 to 5, the last of their hands
+    asked = []
+
+    def model(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        system, content = body["messages"][0]["content"], body["messages"][1]["content"]
+        raw = base64.b64decode(content[1]["image_url"]["url"].split(",", 1)[1])
+        n = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR).shape[0] - 20
+        text = content[0]["text"]
+        asked.append((system[:40], n))
+        if "what is in the shopper's hands" in system:
+            answer = {"hands": "visible", "items": [{"product": "deep-work", "read": "DEEP WORK"}, {"product": "unknown"}] if n == 4 else [{"product": "unknown"}, {"product": "unknown"}], "why": "test"}
+        elif "Question: is the shopper holding" in system:
+            answer = {"answer": "yes" if n >= 10 else "unknown", "read": "", "why": "test"}
+        else:  # the shelf: picture 2 shows Shoe Dog going back
+            answer = {"placing": "yes" if n == 2 else "no", "product": "shoe-dog" if n == 2 else "unknown", "read": "SHOE DOG" if n == 2 else "", "why": "test"}
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)}}]})
+
+    async def scenario(budget=12):
+        verifier = Verifier({"LLM_URL": "http://model.test", "LLM_MODAL_KEY": "k", "LLM_MODAL_SECRET": "s"})
+        await verifier.http.aclose()
+        verifier.http = httpx.AsyncClient(transport=httpx.MockTransport(model))
+        lines = [
+            {"line": 1, "product": "shoe-dog", "name": "Shoe Dog", "looks_like": "black spine", "door": "put_back", "door_why": "Put down on the way out", "last_read_t": 27.5},
+            {"line": 2, "product": "think-straight", "name": "Think Straight", "looks_like": "orange spine", "door": None, "door_why": "", "last_read_t": 25.4},
+            {"line": 3, "product": "deep-work", "name": "Deep Work", "looks_like": "yellow spine", "door": None, "door_why": "", "last_read_t": 28.9},
+        ]
+        evidence = {"held": {2: (25.4, picture(12)), 3: (28.9, picture(13))}, "pick": {}, "views": views, "shelf": [], "scene": None}
+        catalogue = [{"id": i, "name": n} for i, n in (("shoe-dog", "Shoe Dog"), ("think-straight", "Think Straight"), ("deep-work", "Deep Work"))]
+        out = await verifier.check_visit(lines, evidence, catalogue, budget=budget)
+        await verifier.close()
+        return out
+
+    out = asyncio.run(scenario())
+    verdicts = out["verdicts"]
+    assert verdicts[1]["verdict"] == "put_back" and "put on the shelf" in verdicts[1]["why"] and verdicts[1]["absent"]
+    assert verdicts[2]["verdict"] == "unclear" and not verdicts[2]["absent"]  # in hand earlier, unreadable as they left
+    assert verdicts[3]["verdict"] == "kept" and "as they left" in verdicts[3]["why"]
+    assert out["calls"] <= 12 and len(out["steps"]) == out["calls"] == len(out["pictures"]) == len(asked)
+    assert [s["ask"] for s in out["steps"]][:2] == ["leaving", "leaving"]
+    asked.clear()
+    few = asyncio.run(scenario(budget=2))  # out of questions: the rest is unclear, never guessed
+    assert few["calls"] == 2 and len(asked) == 2 and all(v["verdict"] != "kept" for n, v in few["verdicts"].items() if n != 3)
+
+
+def test_the_book_they_could_not_read_is_matched_by_its_look_among_the_titles_it_could_be():
+    """The door counted one unreadable book in their hands, and two titles it could be: one on the bill (read last
+    some time ago), one the floor saw go back after it was read (a track that slipped in a stack). Both of the last
+    views say it looks like the second: that one goes back on the bill, the first comes off. Views that disagree
+    decide nothing, and a title is put back on the bill only on both views."""
+    import json
+
+    import httpx
+
+    from checkout.verify import Verifier
+
+    def run(said, shelved=None):
+        answers = list(said)
+
+        def model(request: httpx.Request) -> httpx.Response:
+            system = json.loads(request.content)["messages"][0]["content"]
+            if "putting a book onto a shelf here" in system:
+                answer = {"product": shelved, "why": "white book going back"}
+            elif "Question: is a hand putting an item onto or into a shelf" in system:
+                answer = {"placing": "yes" if shelved else "no", "product": "unknown", "why": "test"}
+            elif "which of the candidate books" in system:
+                answer = {"product": answers.pop(0), "why": "pale blue cover"}
+            elif "what is in the shopper's hands" in system:
+                answer = {"hands": "visible", "items": [{"product": "unknown"}], "why": "test"}
+            elif "Question: is the shopper holding" in system:
+                answer = {"answer": "unknown", "read": "", "why": "test"}
+            else:
+                answer = {"placing": "no", "product": "unknown", "why": "test"}
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)}}]})
+
+        async def scenario():
+            verifier = Verifier({"LLM_URL": "http://model.test", "LLM_MODAL_KEY": "k", "LLM_MODAL_SECRET": "s"})
+            await verifier.http.aclose()
+            verifier.http = httpx.AsyncClient(transport=httpx.MockTransport(model))
+            lines = [{"line": 1, "product": "deep-work", "name": "Deep Work", "looks_like": "white spine", "door": None, "door_why": "", "last_read_t": 27.6}]
+            views = [(28.0 + n, PICTURE) for n in range(3)]
+            doubt = {"spare": 1, "candidates": [{"product": "deep-work", "name": "Deep Work", "looks_like": "white spine", "line": 1, "sure": True},
+                                                {"product": "ikigai", "name": "Ikigai", "looks_like": "pale blue, blossom", "line": None}]}
+            catalogue = [{"id": "deep-work", "name": "Deep Work"}, {"id": "ikigai", "name": "Ikigai"}]
+            out = await verifier.check_visit(lines, {"held": {1: (27.6, PICTURE)}, "pick": {}, "views": views, "shelf": [], "scene": None}, catalogue, doubt=doubt)
+            await verifier.close()
+            return out
+
+        return asyncio.run(scenario())
+
+    both = run(["ikigai", "ikigai"])
+    assert [r["product"] for r in both["reinstate"]] == ["ikigai"]
+    assert both["verdicts"][1]["verdict"] == "put_back" and both["verdicts"][1]["absent"] and "is Ikigai" in both["verdicts"][1]["why"]
+    # one view is not enough to put a title back on the bill, nor to take one off; with nothing seen going onto a
+    # shelf, the title on the bill is left to the floor's readings (not absent)
+    one = run(["ikigai", "unknown"])
+    assert one["reinstate"] == [] and one["verdicts"][1]["verdict"] == "unclear" and not one["verdicts"][1]["absent"]
+    split = run(["ikigai", "deep-work"])  # the views disagree: neither is clearly the one
+    assert split["reinstate"] == [] and split["verdicts"][1]["verdict"] == "unclear" and not split["verdicts"][1]["absent"]
+    # a book seen going onto the shelf that cannot be told apart: the title on the bill is held, not charged
+    went = run(["unknown", "unknown"], shelved="unknown")
+    assert went["reinstate"] == [] and went["verdicts"][1]["verdict"] == "unclear" and went["verdicts"][1]["absent"]
+    kept = run(["deep-work", "unknown"])  # it looks like the title on the bill: that one stays
+    assert kept["reinstate"] == [] and kept["verdicts"][1]["verdict"] == "kept"
+    # a white book seen going onto the shelf looks like Deep Work: it comes off, and the one book they still hold
+    # unread can only be the other title, which goes back on the bill without asking which it looks like
+    gone = run([], shelved="deep-work")
+    assert gone["verdicts"][1]["verdict"] == "put_back" and "Seen put on the shelf" in gone["verdicts"][1]["why"]
+    assert [r["product"] for r in gone["reinstate"]] == ["ikigai"] and "onto the shelf" in gone["reinstate"][0]["why"]
+    assert "which" not in [s["ask"] for s in gone["steps"]] and "placed" in [s["ask"] for s in gone["steps"]]
+
+
+def test_the_check_in_steps_keeps_a_product_without_a_title_held_and_not_seen_put_down():
+    """A product told apart by its look, not a title (a tube of cream): seen in hand earlier and not seen going onto a
+    shelf, it is kept even when it is not named in the pictures as they leave, as the one-look check did. One seen
+    going back still comes off. A book the door found gone, with only another item seen going back, is left to the
+    floor's readings."""
+    import base64
+    import json
+
+    import cv2
+    import httpx
+
+    from checkout.verify import Verifier
+
+    def picture(n):
+        return np.zeros((20 + n, 30, 3), np.uint8)
+
+    views = [(26.0 + 0.5 * n, picture(n)) for n in range(4)]
+
+    def model(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        system, content = body["messages"][0]["content"], body["messages"][1]["content"]
+        raw = base64.b64decode(content[1]["image_url"]["url"].split(",", 1)[1])
+        n = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR).shape[0] - 20
+        if "what is in the shopper's hands" in system:
+            answer = {"hands": "hidden", "items": [], "why": "test"}
+        elif "Question: is the shopper holding" in system:
+            answer = {"answer": "yes" if n >= 10 else "unknown", "read": "", "why": "test"}
+        else:  # picture 1 shows the earbuds going back
+            answer = {"placing": "yes" if n == 1 else "no", "product": "earbuds" if n == 1 else "unknown", "read": "", "why": "test"}
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)}}]})
+
+    async def scenario():
+        verifier = Verifier({"LLM_URL": "http://model.test", "LLM_MODAL_KEY": "k", "LLM_MODAL_SECRET": "s"})
+        await verifier.http.aclose()
+        verifier.http = httpx.AsyncClient(transport=httpx.MockTransport(model))
+        lines = [
+            {"line": 1, "product": "nivea", "name": "Nivea", "looks_like": "blue tube", "door": None, "door_why": "", "last_read_t": None, "titled": False},
+            {"line": 2, "product": "earbuds", "name": "Earbuds", "looks_like": "white case", "door": None, "door_why": "", "last_read_t": None, "titled": False},
+            # a book the door found gone (not read in its last pictures), with nothing but the earbuds seen going back
+            {"line": 3, "product": "deep-work", "name": "Deep Work", "looks_like": "yellow spine", "door": "put_back", "door_why": "Put down on the way out", "last_read_t": 25.0, "titled": True},
+        ]
+        evidence = {"held": {1: (24.0, picture(12)), 2: (24.5, picture(13))}, "pick": {}, "views": views, "shelf": [], "scene": None}
+        catalogue = [{"id": "nivea", "name": "Nivea"}, {"id": "earbuds", "name": "Earbuds"}, {"id": "deep-work", "name": "Deep Work"}]
+        out = await verifier.check_visit(lines, evidence, catalogue)
+        await verifier.close()
+        return out
+
+    verdicts = asyncio.run(scenario())["verdicts"]
+    assert verdicts[1]["verdict"] == "kept" and "not seen put down" in verdicts[1]["why"]
+    assert verdicts[2]["verdict"] == "put_back" and verdicts[2]["absent"]
+    assert verdicts[3]["verdict"] == "unclear" and not verdicts[3]["absent"]  # a stack, not a put-back: the floor decides
+
+
+def test_a_placing_named_as_the_book_still_in_hand_is_matched_among_the_others_or_not_believed():
+    """The shelf question names the book in the other hand (read in hand as they leave). The placing is matched among
+    the other titles by its look: one that fits comes off; when none fits, the placing is not believed, and a book the
+    door found gone with nothing else seen going back is left to the floor's readings."""
+    import json
+
+    import httpx
+
+    from checkout.verify import Verifier
+
+    def run(placed):
+        def model(request: httpx.Request) -> httpx.Response:
+            system = json.loads(request.content)["messages"][0]["content"]
+            if "putting a book onto a shelf here" in system:
+                answer = {"product": placed, "why": "white book"}
+            elif "Question: is a hand putting an item onto or into a shelf" in system:
+                answer = {"placing": "yes", "product": "blue-ocean-strategy", "why": "test"}
+            elif "what is in the shopper's hands" in system:
+                answer = {"hands": "visible", "items": [{"product": "blue-ocean-strategy", "read": "BLUE OCEAN"}], "why": "test"}
+            else:
+                answer = {"answer": "unknown", "read": "", "why": "test"}
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)}}]})
+
+        async def scenario():
+            verifier = Verifier({"LLM_URL": "http://model.test", "LLM_MODAL_KEY": "k", "LLM_MODAL_SECRET": "s"})
+            await verifier.http.aclose()
+            verifier.http = httpx.AsyncClient(transport=httpx.MockTransport(model))
+            lines = [
+                {"line": 1, "product": "blue-ocean-strategy", "name": "Blue Ocean Strategy", "looks_like": "blue", "door": None, "door_why": "", "last_read_t": 29.0, "titled": True},
+                {"line": 2, "product": "the-psychology-of-money", "name": "The Psychology of Money", "looks_like": "white", "door": "put_back", "door_why": "Put down on the way out", "last_read_t": 27.6, "titled": True},
+            ]
+            views = [(28.0 + 0.5 * n, PICTURE) for n in range(4)]
+            catalogue = [{"id": x["product"], "name": x["name"]} for x in lines]
+            out = await verifier.check_visit(lines, {"held": {}, "pick": {}, "views": views, "shelf": [], "scene": None}, catalogue)
+            await verifier.close()
+            return out["verdicts"]
+
+        return asyncio.run(scenario())
+
+    matched = run("the-psychology-of-money")
+    assert matched[2]["verdict"] == "put_back" and "Seen put on the shelf" in matched[2]["why"]
+    assert matched[1]["verdict"] == "kept"
+    unmatched = run("unknown")
+    assert unmatched[2]["verdict"] == "unclear" and not unmatched[2]["absent"]

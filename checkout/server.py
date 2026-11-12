@@ -22,7 +22,7 @@ The catalogue (/catalogue)   for the shop: the products, their pictures, and foo
     PUT  /api/catalog/bookshop             the whole catalogue
     POST /api/examples/bookshop            a JPEG: a picture of a product -> {file}, then listed under its `examples`
     GET  /api/examples/bookshop/ex-x.jpg   one of those pictures
-    POST /api/clips                        a video (the body), or {"sample": "IMG_6401.MOV"} -> its frames
+    POST /api/clips                        a video (the body), or {"sample": "bookshop-demo.mp4"} -> its frames
     GET  /api/clips/x/frames/3             one frame
     POST /api/clips/x/frames/3/look        {prompts, example?: box} -> SAM's outlines on that frame
     POST /api/clips/x/describe             {frame, box} -> the second model's name, phrases, category for the object

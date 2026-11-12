@@ -113,7 +113,7 @@ def test_every_route_but_the_gate_needs_staff(guarded):
             assert r.status_code == 401, (method, route.path, r.status_code)
             checked += 1
     assert checked >= 29  # every staff route there is today
-    for mounted in ("/samples/IMG_6401.MOV",):
+    for mounted in ("/samples/bookshop-demo.mp4",):
         assert ask("GET", mounted).status_code == 401
     assert ask("GET", "/dashboard", headers={"accept": "text/html"}).headers["location"] == "/signin?next=%2Fdashboard"
 

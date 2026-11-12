@@ -110,6 +110,10 @@ def describe(event: dict, state: dict) -> str:
             return f"{t}  {who} is {event['name']}, {where} ({event.get('method') or 'no payment method'})"
         case "unregistered":
             return f"{t}  {who} is not identified{' (resembles ' + event['name'] + ', match too weak)' if event.get('name') else ''}: nothing will be charged"
+        case "check":
+            name = event.get("name") or name
+            asked = {"leaving": "in the hands as they leave?", "held": f"{name} in the hand?", "shelf": "item put on the shelf?", "which": "unreadable book looks like?", "placed": "book going onto the shelf looks like?"}.get(event.get("ask"), "")
+            return f"{t}  Final check, step {event.get('step')}: {asked} {event.get('answer')}"
         case "audit":
             return f"{t}  Check before charging, {name}: {event['verdict']} ({event['why']})"
         case "invoice":

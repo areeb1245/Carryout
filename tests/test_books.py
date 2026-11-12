@@ -226,6 +226,9 @@ class Looks:
     async def carried(self, frame, box, products):
         return {"products": list(self.reads), "unreadable": self.unreadable, "hands_visible": True, "why": "what the test says"}
 
+    async def audit(self, lines, pictures):  # the one-look final check: says "kept" to everything it is asked
+        return {line["line"]: {"verdict": "kept", "why": "test"} for line in lines}
+
 
 def test_a_book_still_in_the_hand_is_not_taken_for_put_down_when_its_title_stops_showing(tmp_path):
     """A live shopper turns a book over, or lays another on top of it. The looks stop reading its title, but it has
@@ -334,3 +337,178 @@ def test_a_title_not_in_the_hands_as_they_leave_is_not_charged(tmp_path):
     assert [(l["name"], l["charge"]) for l in other["lines"]] == [("Deep Work", False), ("Shoe Dog", True)] and other["total"] == 65
     one = asyncio.run(scenario([], 0, pictures=1))  # a single picture takes nothing off a bill
     assert one["total"] == 59
+
+
+def test_a_title_put_down_on_the_way_out_comes_off_and_an_unreadable_one_keeps_the_doubt(tmp_path):
+    """The last pictures, in order. Deep Work is read in the first two, then put back on the shelf and missing from
+    the four after: put down on the way out, even though it was in hand a moment before. Shoe Dog, read on the floor,
+    is never legible in these pictures, but something in their hands is: the doubt is Shoe Dog's, not Deep Work's."""
+    import asyncio
+
+    import numpy as np
+
+    from checkout.pipeline import Services, Session
+
+    # what each of the last six pictures shows: (titles read, things that could not be read)
+    door = [(["deep-work", "do-it-today"], 0), (["deep-work"], 1), (["do-it-today"], 1), (["do-it-today"], 1), ([], 0), ([], 2)]
+
+    class Door(Looks):
+        async def carried(self, frame, box, products):
+            if box[0] >= 10:  # a picture at the door: its box says which
+                reads, unreadable = door[int(box[0]) - 10]
+                return {"products": reads, "unreadable": unreadable, "hands_visible": True, "why": "the test's picture"}
+            return await super().carried(frame, box, products)
+
+    async def scenario():
+        hands = Door()
+        session = Session(Services(None, hands), BOOKS)
+        engine = session.engine
+        shelf = Shelf()
+        shelf.engine = engine
+        shelf.settle_in()
+        pid = engine.snapshot()["people"][0]["id"]
+        hands.reads = ["deep-work", "shoe-dog", "do-it-today"]
+        for t in (1.0, 2.0):
+            await session._ask_hand(pid, t, None, [0, 0, 1, 1])
+        assert engine.carts()[0]["total"] == 59 + 65 + 49
+        picture = np.zeros((40, 40, 3), np.uint8)
+        session.evidence[pid]["last"] = [(8.0 + 0.5 * n, picture, [10 + n, 0, 1, 1], picture) for n in range(len(door))]
+        await session._last_looks(pid)
+        ids = {e.item.settled: e.id for e in engine.entries}
+        lines = {line["name"]: (line["charge"], line["audit"]) for line in engine.carts()[0]["lines"]}
+        doubt = session.doubt.get(pid)
+        # and without a stepwise check to settle it, the titles that went missing stay off
+        session.doubt[pid] = doubt
+        await session._audit(pid)
+        after = {line["name"]: line["audit"] for line in engine.carts()[0]["lines"]}
+        return lines, doubt, ids, after
+
+    lines, doubt, ids, after = asyncio.run(scenario())
+    # Deep Work read and then missing from four pictures; Shoe Dog not read since the floor: both went missing, while
+    # one thing in their hands could not be read. Which of them it is, the door does not guess: the final check decides.
+    assert doubt == {"spare": 1, "on_bill": [], "gone": [ids["deep-work"], ids["shoe-dog"]], "lost": []}
+    assert lines["Do It Today"] == (True, None)  # read two pictures before the end: not three missing yet
+    assert after["Deep Work"] == after["Shoe Dog"] == "put_back"
+
+
+def test_the_check_in_steps_is_recorded_on_the_visit(tmp_path):
+    """The check before charging, run from the pipeline: each step is an event on the visit and a picture behind
+    the bill, and a title confirmed on the floor that the check cannot make out as they leave is still charged."""
+    import asyncio
+
+    import numpy as np
+
+    from checkout.pipeline import Services, Session
+
+    class Checks(Looks):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        async def check_visit(self, lines, evidence, catalogue, budget=12, doubt=None):
+            self.seen = (lines, evidence, catalogue)
+            picture = np.zeros((30, 30, 3), np.uint8)
+            return {"verdicts": {1: {"verdict": "unclear", "why": "title not readable as they left", "absent": False}},
+                    "steps": [{"step": 1, "line": None, "ask": "leaving", "t": 9.0, "answer": "unreadable item", "why": "blurred"},
+                              {"step": 2, "line": 1, "ask": "held", "t": 2.0, "answer": "Yes", "why": "reads DEEP WORK"}],
+                    "pictures": [(9.0, picture, "step 1: What is in the hands as they leave? unreadable item"), (2.0, picture, "step 2: Is Deep Work in the hand? Yes")], "calls": 2}
+
+    async def scenario():
+        hands = Checks()
+        session = Session(Services(None, hands), BOOKS)
+        engine = session.engine
+        shelf = Shelf()
+        shelf.engine = engine
+        shelf.settle_in()
+        pid = engine.snapshot()["people"][0]["id"]
+        picture = np.zeros((40, 40, 3), np.uint8)
+        for t in (1.0, 2.0):
+            await session._ask_hand(pid, t, None, [0, 0, 1, 1], picture)
+        floor = {e.id for e in engine.entries if e.verified == "confirmed"}
+        check = await session._audit(pid, floor)
+        return engine, session, check, pid, hands.seen
+
+    engine, session, check, pid, (lines, evidence, catalogue) = asyncio.run(scenario())
+    assert lines[0]["name"] == "Deep Work" and lines[0]["last_read_t"] == 2.0 and 1 in evidence["held"]
+    assert {c["id"] for c in catalogue} >= {"deep-work", "shoe-dog"} and "pen" not in {c["id"] for c in catalogue}
+    assert check["status"] == "checked" and check["steps"] == 2 and check["kept"] == 1
+    line = engine.carts()[0]["lines"][0]
+    assert line["audit"] == "kept" and "Confirmed in hand in store" in line["audit_why"]
+    steps = [e for e in engine.events if e["type"] == "check"]
+    assert [(e["step"], e["ask"]) for e in steps] == [(1, "leaving"), (2, "held")] and steps[1]["entry"] == line["id"]
+    assert len(session.shown[pid]) == 2 and session.shown_notes[pid][0][1].startswith("Final check, step 1")
+
+
+def test_something_unreadable_in_hand_never_keeps_a_title_seen_going_back():
+    """Only two titles on the bill. Deep Work is read, then missing from the last three pictures, while one thing in
+    their hands cannot be read (in fact a book the looks never named). That thing is not Deep Work: it comes off."""
+    import asyncio
+
+    import numpy as np
+
+    from checkout.pipeline import Services, Session
+
+    door = [(["deep-work"], 0), ([], 0), (["deep-work"], 1), ([], 1), (["do-it-today"], 1), (["do-it-today"], 1)]
+
+    class Door(Looks):
+        async def carried(self, frame, box, products):
+            if box[0] >= 10:
+                reads, unreadable = door[int(box[0]) - 10]
+                return {"products": reads, "unreadable": unreadable, "hands_visible": True, "why": "the test's picture"}
+            return await super().carried(frame, box, products)
+
+    async def scenario():
+        hands = Door()
+        session = Session(Services(None, hands), BOOKS)
+        engine = session.engine
+        shelf = Shelf()
+        shelf.engine = engine
+        shelf.settle_in()
+        pid = engine.snapshot()["people"][0]["id"]
+        hands.reads = ["deep-work", "do-it-today"]
+        for t in (1.0, 2.0):
+            await session._ask_hand(pid, t, None, [0, 0, 1, 1])
+        picture = np.zeros((40, 40, 3), np.uint8)
+        session.evidence[pid]["last"] = [(8.0 + 0.6 * n, picture, [10 + n, 0, 1, 1], picture) for n in range(len(door))]
+        await session._last_looks(pid)
+        doubt = session.doubt.get(pid)
+        await session._audit(pid)  # no stepwise check here: what went missing stays off
+        return engine.carts()[0], doubt
+
+    cart, doubt = asyncio.run(scenario())
+    assert doubt["gone"] and not doubt["on_bill"]  # Deep Work is only a candidate, and only on both of the last views
+    assert {line["name"]: line["charge"] for line in cart["lines"]} == {"Deep Work": False, "Do It Today": True} and cart["total"] == 49
+
+
+def test_a_title_whose_outline_went_back_is_a_candidate_for_the_unreadable_book_at_the_door():
+    """Shoe Dog was read twice in their hands, then its outline was seen going back, after its last reading: in a
+    stack a track can slip onto the next book. At the door one book in their hands cannot be read. The door does not
+    guess which: it hands Shoe Dog to the final check as a title that book could be."""
+    import asyncio
+
+    import numpy as np
+
+    from checkout.pipeline import Services, Session
+
+    async def scenario():
+        hands = Looks()
+        session = Session(Services(None, hands), BOOKS)
+        engine = session.engine
+        shelf = Shelf()
+        shelf.engine = engine
+        shelf.settle_in()
+        pid = engine.snapshot()["people"][0]["id"]
+        hands.reads = ["deep-work", "shoe-dog"]
+        for t in (1.0, 2.0):
+            await session._ask_hand(pid, t, None, [0, 0, 1, 1])
+        lost = next(e for e in engine.entries if e.item.settled == "shoe-dog")
+        lost.state, lost.returned_t = "returned", 5.0  # the outline went back on the shelf
+        hands.reads, hands.unreadable = ["deep-work"], 1
+        picture = np.zeros((40, 40, 3), np.uint8)
+        session.evidence[pid]["last"] = [(8.0 + n, picture, [0, 0, 1, 1], picture) for n in range(3)]
+        await session._last_looks(pid)
+        return session.doubt.get(pid), lost.id, engine.carts()[0]
+
+    doubt, lost_id, cart = asyncio.run(scenario())
+    assert doubt == {"spare": 1, "on_bill": [], "gone": [], "lost": [lost_id]}
+    assert cart["total"] == 59  # Deep Work, read as they left; Shoe Dog not back on the bill yet

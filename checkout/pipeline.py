@@ -54,10 +54,16 @@ MORE_LOOKS = 7  # for an item that still has no name after those
 LOOK_GAP_S = 0.7
 LOOK_WINDOW_S = 8.0  # stop waiting for the item to come back into view after this long
 SIGHT_GAP_S = 0.7  # how often the text on a held family item is read again
-HAND_ASKS = 80  # whole-hand questions per shopper per visit
+HAND_ASKS = 120  # whole-hand questions per shopper per visit (about a minute of carrying, looked at twice a second)
 HAND_ASK_GAP_S = 0.9
+EAGER_GAP_S = 0.25  # while eager: every frame a live camera sends (about three a second)
 HAND_MISSES = 3  # looks in a row without a title before it counts as put down
 HAND_GONE_S = 4.0
+PAIR_S = 6.0  # two readings of a title further apart than this are not two readings of one book
+VOTE_LAPSE_S = 2.0  # a single reading of a title not on the cart lapses after three looks without it, and this long
+IN_FLIGHT = 2  # whole-hand looks at once per shopper
+EAGER_IN_FLIGHT = 3  # whole-hand looks at once per shopper while eager
+HAND_BACKLOG = 8  # frames queued for a look while those are out, oldest dropped first
 READ_TRIES = 3  # attempts at reading a shelf item's text
 READ_RETRY_S = 2.5
 VERIFY_WAIT_S = 10.0
@@ -139,6 +145,8 @@ class Session:
         self.all_read: dict[int, int] = {}
         self.unreadable: dict[int, int] = {}  # per shopper: carried items the last look could not read
         self.asking: dict[int, int] = {}  # whole-hand questions in flight, per shopper
+        self.hand_backlog: dict[int, list] = {}  # frames waiting for a whole-hand look, per shopper, oldest first
+        self.doubt: dict[int, dict] = {}  # per shopper: titles the door look could not tell apart, for the final check
         self.sighted_t: dict[int, float] = {}
         self.naming = asyncio.Semaphore(4)
         self.likeness = Likeness(self.sam, catalog)
@@ -224,6 +232,8 @@ class Session:
                 if picked is not None and self.catalog.family_of(picked.seen_as) and self.services.verifier and self.services.verifier.enabled:
                     continue  # one of a family (a book): named by the whole-hand looks, not one outline at a time
                 self.watch[event["entry"]] = {"person": event["person"], "item": event["item"], "looks": 0, "next_t": t}
+            elif event["type"] == "return":
+                self._shelf_view(event, frame, state)
             elif event["type"] == "exit":
                 self._spawn(self._pay(event["person"]))
         self._second_looks(t, frame, state)
@@ -418,6 +428,15 @@ class Session:
         x1, y1 = int(min(1.0, box[2] + grow * bw) * w), int(min(1.0, box[3] + grow * bh) * h)
         return frame[y0:max(y1, y0 + 2), x0:max(x1, x0 + 2)].copy()
 
+    @staticmethod
+    def _hands_box(pid: int, state: dict) -> list[float] | None:
+        """The part of the frame with this shopper's outlined hands and the items held in them, or None."""
+        boxes = [h["box"] for h in state["hands"] if h.get("person") == pid]
+        boxes += [i["box"] for i in state["items"] if i["state"] == "held" and i.get("holder") == pid]
+        if not boxes:
+            return None
+        return [min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)]
+
     def _carrying_view(self, pid: int, frame: np.ndarray, state: dict, person_box: list[float]) -> np.ndarray:
         """A picture of what this shopper has in their hands: their hands and the items in them with room around,
         or the whole shopper when no hand is outlined in this frame."""
@@ -453,6 +472,17 @@ class Session:
             memo["recent"].append((t, last[-1][3] if last[-1][0] == t else self._shrink(self._carrying_view(pid, frame, state, person["box"]))))
             del memo["recent"][:-2]
             memo["scene"] = (t, jpeg if jpeg is not None else frame)  # and the whole picture, shelves included, the last time they were seen
+
+    def _shelf_view(self, event: dict, frame: np.ndarray, state: dict) -> None:
+        """The floor saw something of theirs go back: keep a picture of that moment for the check before charging."""
+        verifier, pid = self.services.verifier, event.get("person")
+        person = next((p for p in state["people"] if p["id"] == pid), None)
+        if verifier is None or not verifier.enabled or person is None or frame is None:
+            return
+        shelf = self.evidence.setdefault(pid, {"read": {}, "recent": []}).setdefault("shelf", [])
+        if not shelf or shelf[-1][0] != event["t"]:
+            shelf.append((event["t"], self._shrink(self._carrying_view(pid, frame, state, person["box"]))))
+            del shelf[:-LAST_LOOKS]
 
     def _pictures(self, pid: int, entries: list) -> list[tuple[float, np.ndarray]]:
         """What the last check is shown, oldest first: for each line the picture in which that item was read in
@@ -646,24 +676,54 @@ class Session:
         for person in state["people"]:
             pid = person["id"]
             asked, last = self.hand_asks.get(pid, (0, -9.0))
-            # twice as often, two at a time, while a pick of theirs still has no confirmed title
-            eager = self.engine.unnamed(pid) > 0
-            if asked >= HAND_ASKS or t - last < (HAND_ASK_GAP_S / 2 if eager else HAND_ASK_GAP_S) or self.asking.get(pid, 0) >= (2 if eager else 1):
+            # A look takes a second or two, and a title is often legible for a second or less as a book turns in the
+            # hand: asking only when the last look is back steps right over it. So the frames are taken at a steady
+            # pace whatever the model's speed, looked at two at a time, the rest queued in order. Every frame, three
+            # at a time, while a pick of theirs still has no confirmed title, the last look saw something in their
+            # hands it could not read, or a title has been read once and waits for its second reading.
+            single = any(v["votes"] == 1 and not v["on_cart"] for v in self.carried.get(pid, {}).values())  # one reading, waiting for its second
+            eager = self.engine.unnamed(pid) > 0 or self.unreadable.get(pid, 0) > 0 or single
+            if asked >= HAND_ASKS or t - last < (EAGER_GAP_S if eager else HAND_ASK_GAP_S):
                 continue
+            busy = self.asking.get(pid, 0) >= (EAGER_IN_FLIGHT if eager else IN_FLIGHT)
             carrying = any(v["on_cart"] for v in self.carried.get(pid, {}).values())
             if not (self.engine.holding(pid) or carrying or self.engine.unnamed(pid)):
                 continue  # nothing taken yet: nothing to ask about
             self.hand_asks[pid] = (asked + 1, t)
-            self.asking[pid] = self.asking.get(pid, 0) + 1
-            task = self._spawn(self._ask_hand(pid, t, frame, person["box"], self._shrink(self._carrying_view(pid, frame, state, person["box"]))))
-            pending = self.checks.setdefault(pid, set())
-            pending.add(task)
-            task.add_done_callback(pending.discard)
+            look = (t, frame, person["box"], self._shrink(self._carrying_view(pid, frame, state, person["box"])), self._hands_box(pid, state))
+            if busy:
+                backlog = self.hand_backlog.setdefault(pid, [])
+                backlog.append((t, self._jpeg(frame, 1600), *look[2:]))  # a JPEG: a raw frame is 4 MB
+                del backlog[:-HAND_BACKLOG]
+                continue
+            self._start_look(pid, *look)
 
-    async def _ask_hand(self, pid: int, t: float, frame: np.ndarray, box: list[float], view: np.ndarray | None = None) -> None:
+    @staticmethod
+    def _paired(memo: dict) -> bool:
+        """Two readings of a title close enough to count as two readings of one book: a few seconds apart at most, with
+        fewer than three looks between them (by frame time) in which the hands were in view and it was not read."""
+        reads, missed = sorted(memo.get("reads", [])), memo.get("missed", [])
+        return any(b - a <= PAIR_S and sum(1 for m in missed if a < m < b) < HAND_MISSES for a, b in zip(reads, reads[1:]))
+
+    def _start_look(self, pid: int, t: float, frame, box: list[float], view: np.ndarray, hands: list[float] | None = None) -> None:
+        self.asking[pid] = self.asking.get(pid, 0) + 1
+        task = self._spawn(self._ask_hand(pid, t, self._image(frame), box, view, hands))
+        pending = self.checks.setdefault(pid, set())
+        pending.add(task)
+        task.add_done_callback(pending.discard)
+
+    def _next_look(self, pid: int) -> None:
+        """A look is back: the oldest queued frame of this shopper goes next."""
+        backlog = self.hand_backlog.get(pid)
+        if backlog and not self.closed:
+            self._start_look(pid, *backlog.pop(0))
+
+    async def _ask_hand(self, pid: int, t: float, frame: np.ndarray, box: list[float], view: np.ndarray | None = None, hands: list[float] | None = None) -> None:
         try:
             books = [p for group in self.catalog.members.values() for p in group]
-            answer = await self.services.verifier.carried(frame, box, books)
+            # the close-up is of their hands and what is in them, enlarged, when those are outlined: a title on a book
+            # in a hand is a few pixels tall in the whole shopper
+            answer = await (self.services.verifier.carried(frame, box, books, hands) if hands else self.services.verifier.carried(frame, box, books))
             if not answer:
                 return
             in_order = t >= self.hand_seen_t.get(pid, -1.0)  # answers can overtake each other
@@ -678,14 +738,22 @@ class Session:
                 if memo["on_cart"] and not engine.has_title(pid, product):
                     # The outlines said it went back on the shelf, yet here it is, read in their hands. One look
                     # is not enough to undo that: it comes back onto the cart only if a second look reads it too.
-                    memo.update(votes=0, on_cart=False)
+                    memo.update(votes=0, on_cart=False, reads=[], missed=[])
+                memo.setdefault("reads", []).append(t)
                 memo["votes"], memo["misses"], memo["last_t"] = memo["votes"] + 1, 0, max(t, memo["last_t"])
                 # Two readings put a title on the bill: two looks at their hands, or one look and a line of theirs
-                # that already carries this title from the shelf it was taken from.
+                # that already carries this title from the shelf it was taken from. Two looks pair up by when their
+                # frames were taken, not when the answers came back (answers overtake each other).
                 named = engine.awaiting(pid, product)
-                if (memo["votes"] >= 2 or named) and not memo["on_cart"]:
-                    why = f"Identified on the shelf, confirmed in hand: {answer['why']}" if memo["votes"] < 2 else f"Read in hand twice: {answer['why']}"
+                paired = memo["votes"] >= 2 or self._paired(memo)
+                if (paired or named) and not memo["on_cart"]:
+                    why = f"Identified on the shelf, confirmed in hand: {answer['why']}" if not paired else f"Read in hand twice: {answer['why']}"
                     memo["on_cart"] = engine.name_line(pid, product, why) or engine.add_seen(pid, product, why) or True
+            if answer["hands_visible"] and not in_order:
+                # an answer that came back late still says which titles that frame did not show, for pairing readings
+                for product, memo in seen.items():
+                    if product not in answer["products"] and not memo["on_cart"]:
+                        memo.setdefault("missed", []).append(t)
             if answer["hands_visible"] and in_order:
                 # A title on the cart that this look did not read. If the look saw at least as many things in the
                 # hands that it could not read, the title is most likely one of those (turned away, or under
@@ -695,13 +763,14 @@ class Session:
                 for product, memo in seen.items():
                     if product in answer["products"] or (hidden and memo["on_cart"]):
                         continue
+                    memo.setdefault("missed", []).append(t)
                     memo["misses"] += 1
                     if memo["on_cart"] and memo["misses"] >= HAND_MISSES and t - memo["last_t"] >= HAND_GONE_S:
                         # the engine refuses while that line's own outline is still in their hand
                         if engine.drop_title(pid, product, "no longer in their hands"):
-                            memo.update(votes=0, misses=0, on_cart=False)
-                    elif not memo["on_cart"] and memo["misses"] >= HAND_MISSES:
-                        memo["votes"] = 0  # a one-off reading that never came back
+                            memo.update(votes=0, misses=0, on_cart=False, reads=[], missed=[])
+                    elif not memo["on_cart"] and memo["misses"] >= HAND_MISSES and t - memo["last_t"] >= VOTE_LAPSE_S:
+                        memo["votes"] = 0  # a one-off reading that never came back (by looks and by time: looks come faster while eager)
                 # with nothing unreadable in the hands on two looks running, picks still without a name are stray outlines
                 self.unreadable[pid] = answer["unreadable"]
                 self.all_read[pid] = self.all_read.get(pid, 0) + 1 if answer["unreadable"] == 0 and answer["products"] else 0
@@ -711,6 +780,7 @@ class Session:
                 self._update(first)
         finally:
             self.asking[pid] = max(0, self.asking.get(pid, 0) - 1)
+            self._next_look(pid)
 
     async def _last_looks(self, pid: int) -> None:
         """What did this shopper have with them as they left? Their last few pictures, about half a second apart,
@@ -738,13 +808,13 @@ class Session:
         books = [p for group in self.catalog.members.values() for p in group]
         answers = await asyncio.gather(*(verifier.carried(self._image(frame), box, books) for _, frame, box, _ in frames), return_exceptions=True)
         read: dict[str, list] = {}
-        clear = []  # the answers from pictures in which their hands could be seen
+        clear = []  # (time, answer) for the pictures in which their hands could be seen, oldest first
         for (t, _, _, view), answer in zip(frames, answers):
             if not isinstance(answer, dict):
                 continue
             self.hand_asks[pid] = (self.hand_asks.get(pid, (0, -9.0))[0] + 1, t)
             if answer["hands_visible"]:
-                clear.append(answer)
+                clear.append((t, answer))
             for product in answer["products"]:
                 read.setdefault(product, []).append((t, view, answer["why"]))
         first = len(engine.events)
@@ -762,15 +832,48 @@ class Session:
             why = f"Read in hand at exit: {why}"
             note["on_cart"] = engine.name_line(pid, product, why) or engine.add_seen(pid, product, why) or True
         if len(clear) >= 2:  # one picture is no basis for taking anything off a bill
-            counts = sorted(answer["unreadable"] for answer in clear)
-            unread = counts[-1]  # for keeping a title on the bill, the most any picture left unread
+            counts = sorted(answer["unreadable"] for _, answer in clear)
             self.unreadable[pid] = counts[(len(counts) - 1) // 2]  # for keeping an untitled pick, what the pictures agree on
-            spare = max(0, unread - engine.unnamed(pid))
-            absent = [e for e in engine.unpaid(pid) if family(e) and e.item.settled not in read]
-            absent.sort(key=lambda e: -seen.get(e.item.settled, {}).get("last_t", e.picked_t))
-            for entry in absent[spare:]:
-                engine.apply_audit(entry.id, "put_back", f"Not in hand in any of the last {len(clear)} pictures")
-                seen.get(entry.item.settled, {}).update(on_cart=False)
+            # Gone, in the order the pictures were taken. A title is gone when its last reading in their hands (here,
+            # or on the floor just before) is followed by three of these pictures that do not show it: the same three
+            # missing readings that take a title off on the floor, but now even within their last seconds, so a book
+            # put back on the way out comes off. A title none of them reads, read longer ago, needs two.
+            last_read = {p: looks[-1][0] for p, looks in read.items()}
+            since = lambda p: max(last_read.get(p, -1.0), seen.get(p, {}).get("last_t", -1.0))
+            later = lambda p: sum(1 for t, _ in clear if t > since(p))
+            billed = [e for e in engine.unpaid(pid) if family(e) and e.item.settled]
+            gone = {e.item.settled for e in billed if later(e.item.settled) >= HAND_MISSES}
+            # The benefit of the doubt: things in their hands that a picture could not read may be titles on the bill.
+            # Per picture, the unreadable things there are first those titles still with them (read in some picture
+            # and not gone since) that this picture did not read, then picks without a title made by then; what is
+            # left over may be a title that is missing. The most any picture leaves over is what can be given.
+            present = set(last_read) - gone
+            untitled = [e for e in engine.unpaid(pid) if family(e) and e.verified is None and e.item.settled is None]
+            spare = max((answer["unreadable"] - sum(1 for p in present if p not in answer["products"]) - sum(1 for e in untitled if e.picked_t <= t) for t, answer in clear), default=0)
+            unread = sorted((e for e in billed if e.item.settled not in last_read and e.item.settled not in gone), key=lambda e: -since(e.item.settled))
+            # Titles read twice in their hands whose outline the floor then saw go back after that reading: in a stack
+            # a track can slip onto the book next to it, and that may have been the one put back. They too may be the
+            # unreadable thing in their hands.
+            on_cart = {e.item.settled for e in engine.entries if e.person == pid and e.state == "in_cart"}
+            lost = [e for e in engine.entries if e.person == pid and e.state == "returned" and not e.paid and e.verified == "confirmed" and self.catalog.family_of(e.item.seen_as)
+                    and e.item.settled and e.item.settled not in on_cart and e.returned_t is not None and e.returned_t > seen.get(e.item.settled, {}).get("last_t", e.returned_t)]
+            lost = list({e.item.settled: e for e in lost}.values())
+            missing = [e for e in billed if e.item.settled in gone]
+            if spare > 0 and (len(unread) > spare or lost or missing):
+                # More titles than unreadable things, or titles that went missing while something stayed unreadable:
+                # which ones the unreadable things are is not for counting to say. The check before charging decides,
+                # from what it sees go onto the shelf and what the book in their hands looks like
+                # (Verifier.check_visit, "placed" and "which"); a title gone here needs both of the last views.
+                self.doubt[pid] = {"spare": spare, "on_bill": [e.id for e in unread], "gone": [e.id for e in missing], "lost": [e.id for e in lost]}
+                absent = []
+            else:
+                absent = unread[max(0, spare):] + missing
+            for entry in absent:
+                product = entry.item.settled
+                why = (f"Put down on the way out: last in hand at {since(product):.1f} s, not in the {later(product)} pictures after it" if product in last_read
+                       else f"Not in hand in any of the last {len(clear)} pictures")
+                engine.apply_audit(entry.id, "put_back", why)
+                seen.get(product, {}).update(on_cart=False)
         if len(engine.events) > first:
             self._update(first)
 
@@ -906,6 +1009,15 @@ class Session:
         self.checking.add(pid)
         self._update(len(engine.events))
         try:
+            if callable(getattr(verifier, "check_visit", None)):
+                return await self._check_steps(pid, entries, floor)
+            for entry in entries:  # no stepwise check to settle the door's doubt: a title that went missing stays off
+                if entry.id in self.doubt.get(pid, {}).get("gone", []):
+                    engine.apply_audit(entry.id, "put_back", "Not in hand in their last pictures")
+            self.doubt.pop(pid, None)
+            entries = engine.unpaid(pid)
+            if not entries:
+                return {"status": "nothing", "kept": 0, "held": 0}
             noted = self._evidence(pid, entries)
             pictures = [(t, image) for t, image, _ in noted]
             self.shown[pid] = [Verifier.lettered(image, chr(65 + i)) for i, (_, image) in enumerate(pictures)]
@@ -939,18 +1051,101 @@ class Session:
         finally:
             self.checking.discard(pid)
 
+    async def _check_steps(self, pid: int, entries: list, floor: set[int]) -> dict:
+        """The check before charging as several questions (Verifier.check_visit). Every step goes into the visit's
+        events, and every picture it looked at into its proofs, so the bill shows why each line was charged or not.
+        Lines the door look already found gone are shown to it too: what goes back on a shelf is matched to them,
+        and they can only stay off the bill."""
+        engine, verifier, catalog = self.engine, self.services.verifier, self.catalog
+        memo = self.evidence.get(pid) or {}
+        gone = [e for e in engine.entries if e.person == pid and e.state == "in_cart" and not e.paid and e.audit == "put_back"
+                and e.item.cls in catalog.by_id and catalog.by_id[e.item.cls].billable and e not in entries]
+        everything = entries + gone
+        lines, held, pick = [], {}, {}
+        for n, entry in enumerate(everything, 1):
+            product = catalog.by_id[entry.item.cls]
+            hit = memo.get("read", {}).get(entry.item.cls)
+            lines.append({"line": n, "product": product.id, "name": product.name, **({"by": product.author} if product.author else {}), "looks_like": product.cues or product.prompt,
+                          "door": "put_back" if entry in gone else None, "door_why": entry.audit_why if entry in gone else "", "last_read_t": hit[0] if hit else None,
+                          "titled": bool(catalog.family_of(product.id))})
+            if hit:
+                held[n] = (hit[0], self._image(hit[1]))
+            shot = self.pick_shots.get(entry.id)
+            if shot:
+                pick[n] = (shot[0], self._image(shot[1]))
+        views = [(t, view) for t, _, _, view in memo.get("last", [])] or list(memo.get("recent", []))
+        scene = (memo["scene"][0], self._image(memo["scene"][1])) if memo.get("scene") else None
+        family = {catalog.family_of(e.item.seen_as) for e in everything} - {None}
+        pool = [p for f in family for p in catalog.members.get(f, [])] + [p for p in catalog.products if not p.family and not p.head and (not family or not p.billable)]
+        catalogue = [{"id": p.id, "name": p.name, **({"by": p.author} if p.author else {}), "looks_like": p.cues or p.prompt} for p in {p.id: p for p in pool}.values()]
+        doubt, candidates = self.doubt.pop(pid, None), []
+        if doubt:
+            ids = {e.id: n for n, e in enumerate(everything, 1)}
+            for entry in engine.entries:
+                if entry.id in doubt["on_bill"] + doubt["gone"] + doubt["lost"] and entry.item.settled in catalog.by_id:
+                    product = catalog.by_id[entry.item.settled]
+                    candidates.append({"product": product.id, "name": product.name, "looks_like": product.cues or product.prompt, "line": ids.get(entry.id),
+                                       "sure": entry.id in doubt["on_bill"],  # one view is enough only for a title not seen to go
+                                       "last_read_t": self.carried.get(pid, {}).get(product.id, {}).get("last_t")})
+        result = await verifier.check_visit(lines, {"held": held, "pick": pick, "views": views, "shelf": list(memo.get("shelf", [])), "scene": scene}, catalogue,
+                                            doubt={"spare": doubt["spare"], "candidates": candidates} if candidates else None)
+        first = len(engine.events)
+        by_line = {n: entry for n, entry in enumerate(everything, 1)}
+        if result:
+            self.shown[pid] = [self._jpeg(image) for _, image, _ in result["pictures"]]
+            self.shown_notes[pid] = [(t, f"Final check, {caption}") for t, _, caption in result["pictures"]]
+            for step in result["steps"]:
+                entry = by_line.get(step["line"])
+                engine.note("check", person=pid, entry=entry.id if entry else None, name=step.get("name"), step=step["step"], ask=step["ask"], at=step["t"], answer=step["answer"], why=step["why"])
+        for n, entry in by_line.items():
+            verdict = (result or {}).get("verdicts", {}).get(n) or {"verdict": "unclear", "why": "The final check got no answer", "absent": False}
+            if entry in gone:
+                if verdict["verdict"] == "put_back":
+                    engine.apply_audit(entry.id, "put_back", verdict["why"])
+                elif verdict["verdict"] == "kept":  # the door and the check disagree: held for review, not guessed
+                    engine.apply_audit(entry.id, "unclear", f"Found gone at the door, seen in hand by the final check: {verdict['why']}")
+                elif not verdict.get("absent") and entry.id in floor and entry.verified == "confirmed" and catalog.family_of(entry.item.seen_as):
+                    # gone from the door's pictures but not seen going onto a shelf: a title read twice in their hands
+                    # on the floor stands, as before the door look counted pictures
+                    engine.apply_audit(entry.id, "kept", f"Confirmed in hand in store; title not visible at checkout ({verdict['why']})")
+                else:
+                    engine.apply_audit(entry.id, "unclear", verdict["why"])
+                continue
+            if result and verdict["verdict"] == "unclear" and not verdict.get("absent") and entry.id in floor and entry.verified == "confirmed" and catalog.family_of(entry.item.seen_as):
+                # the same rule as the one-look check: a title read twice in their hands on the floor, not found gone
+                # at the door, and not seen out of their hands by this check, is charged
+                verdict = {"verdict": "kept", "why": f"Confirmed in hand in store; title not visible at checkout ({verdict['why']})"}
+            engine.apply_audit(entry.id, verdict["verdict"], verdict["why"])
+        for back in (result or {}).get("reinstate", []):
+            # a title read twice in their hands, whose outline the floor saw go back: the book they left with looks
+            # like it in both of the last views, and no other title on the bill can be that book
+            if engine.add_seen(pid, back["product"], f"Read in hand earlier; {back['why']}"):
+                entry = engine.entries[-1]
+                engine.apply_audit(entry.id, "kept", back["why"])
+                entries.append(entry)
+                everything.append(entry)
+        kept = sum(1 for e in everything if e.audit == "kept")
+        self._update(first)
+        return {"status": "checked" if result else "failed", "kept": kept, "held": sum(1 for e in everything if e.audit == "unclear"), "pictures": len((result or {}).get("pictures", [])),
+                "steps": len((result or {}).get("steps", [])), "session": self.id, "person": pid}
+
     async def _pay(self, pid: int) -> None:
         # do not bill a line the second model is still looking at
-        pending = list(self.checks.get(pid, ()))
-        if pending:
-            await asyncio.wait(pending, timeout=VERIFY_WAIT_S)
+        # (and the frames still queued for a look at their hands, which each finished look sets off)
+        until = time.monotonic() + VERIFY_WAIT_S
+        while (pending := list(self.checks.get(pid, ()))) and time.monotonic() < until:
+            await asyncio.wait(pending, timeout=until - time.monotonic())
         engine, pay, book = self.engine, self.services.payments, self.services.faces
         left_at = time.time()
         # the lines whose titles were read in their hands on the floor, before the door look added its own readings
         floor = {e.id for e in engine.entries if e.person == pid and e.verified == "confirmed"}
+        titles = {e.item.settled for e in engine.entries if e.id in floor and e.item.settled}
         if pid in self.who:
             await self._last_looks(pid)
             await self._last_goods(pid)
+        # by title: a line the door look re-added for a title already confirmed in their hands on the floor (its
+        # floor line lost to a track that went astray) was not first read at the door
+        floor |= {e.id for e in engine.entries if e.person == pid and e.verified == "confirmed" and e.item.settled in titles}
         first = len(engine.events)
         if self.hand_asks.get(pid, (0, 0.0))[0] >= 3:
             # Their hands were read several times. A pick that never got a confirmed title from those readings is a

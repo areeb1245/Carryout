@@ -123,6 +123,10 @@ pack at 0.36). So:
 - **Books** are all "book" to SAM. The title is read by the vision model in the shopper's hands: two readings put it
   on the bill, three missing readings in a row take it off, and there is one line per title per shopper. A title read
   only on the shelf by OCR never bills anyone.
+  Their hands are looked at about once a second, whatever the model's speed (frames wait in a queue), and on every
+  frame while something in them cannot be read or a title waits for its second reading. The close-up shown with each
+  look is of their outlined hands and what is in them, enlarged, not the whole shopper: a title on a book in a hand
+  is a few pixels tall.
 
 ### 4. The door: still with them?
 
@@ -134,20 +138,36 @@ with empty hands does not close the visit. For products without a title:
 - otherwise it is held for review, which is what an item put down out of the camera's view looks like;
 - two or more door pictures with both hands empty mark a recent item as put back.
 
+For books, the last six pictures are read again, in order. A title read in them and then missing from the next three
+may have been put down on the way out, or be under the others in a stack: the final check decides, and takes it off
+only when it sees something going onto a shelf after that. Something in their hands that no picture can read may be
+one of the titles not accounted for; the final check works out which.
+
 ### 5. The check before charging
 
-One call to the vision model with the bill and up to five pictures: the picture each item was read in, the latest
-close view of the hands, and the whole scene when the shopper was last seen. For each line it reports the picture
-where the item is held and any later picture where it is at rest again.
+The vision model checks the bill in steps, each a separate question about one picture, at most 12 questions a
+visit (`Verifier.check_visit`). Every answer may be "unknown", and every step is written to the visit's events and
+pictures, so the dashboard shows why each line was charged or not.
+
+1. **Leaving.** What is in their hands in each of the last two views?
+2. **Held.** For each line not read as they left: is this item in their hands, in the picture it was last read in?
+3. **Shelf.** For each line: in the first few views after that, is something being put on a shelf? If so, a second
+   question asks which title it looks like, colour first (the model names its colour, then the title with that
+   colour): a title named on a moving book is often a guess. A placing that looks like a book still in their hands
+   afterwards is not believed.
+4. **Which.** A book in their hands that no view can read: among the titles not accounted for, the ones not seen
+   going back, or the one both last views say it looks like. Titles not told apart are held only if something that
+   could be one of them was seen going back; otherwise a title read twice on the floor stands.
+5. **Cross-check.** Answers that disagree with each other, or with the door look, get one more look at the newest
+   view.
 
 | Verdict | Meaning | Charged |
 |---|---|---|
-| **Kept** | Held in a picture, not seen put down afterwards | Yes |
-| **Put back** | Seen at rest again in a later picture | No |
-| **Unclear** | No picture shows it held | Only a book whose title was already read twice in their hands, and not found gone at the door |
+| **Kept** | In their hands as they left, or (a product without a title) in hand earlier and not seen put down | Yes |
+| **Put back** | Seen put on a shelf, or found gone at the door with something seen going onto a shelf after, and not in hand as they left | No |
+| **Unclear** | Not readable as they left | A book whose title was already read twice in their hands, unless something was seen going back that could be it |
 
-No answer from the model, or no picture kept, means no charge. The model also reports how many of each product it sees
-at once, so one power bank in hand never pays for two.
+No answer from the model means no charge. A product on the bill twice needs two in hand at once.
 
 ### 6. Payment and proof
 
@@ -416,8 +436,8 @@ PayPal, Neon and email are each optional. Without one, that part switches off an
 
 | What | Result |
 |---|---|
-| **End to end on real footage** | Hand-held phone clip, three books taken and stacked (`samples/IMG_6401.MOV`). On 10 November 2026, 5 of 5 rehearsals in a row billed the right three books, USD 249.00, all confirmed by the final check |
-| **A real sandbox payment** | USD 249.00 charged to a saved sandbox card, PayPal invoice 0002 written and marked paid, invoice email sent |
+| **End to end on real footage** | Hand-held phone clip, three books picked up and one put back (the original phone file; `samples/bookshop-demo.mp4` is the same clip re-encoded for browsers). On 12 November 2026, 8 of 8 live runs of the original file billed the right two books, USD 154.00. Runs of the re-encoded copy have missed Ikigai so far, which is still open |
+| **A real sandbox payment** | USD 154.00 charged to a saved sandbox card for that clip, PayPal invoice 0016 written and marked paid, invoice email sent |
 | **SAM 3.1 per frame** | 139 ms for eight phrases on an L40S, batched, against 290 ms one phrase at a time |
 | **Live speed** | 3 to 4 analysed frames a second, answers about 0.4 s behind the camera |
 | **Faces** | Found and embedded in about 15 ms on the server's CPU. Nearest-face search in Neon in about 110 ms |
@@ -425,7 +445,7 @@ PayPal, Neon and email are each optional. Without one, that part switches off an
 | **Likeness** | A pack in a shopper's hand scored 0.71 against its own catalogue picture, enough to name it |
 | **Several shoppers** | Five shoppers at once in the crowd test: each charged once, only for what they carried out |
 | **Memory on Render** | Seven sample visits in a row levelled off at about 375 MB inside a 512 MB plan |
-| **Tests** | 127 passing |
+| **Tests** | 135 passing |
 
 ## Tests and rehearsals
 
@@ -440,7 +460,7 @@ uv run pytest
 | `test_books.py` | A title is billed only once read in the hands, never twice |
 | `test_gate.py` | Known face let in, new face registered with a card or PayPal account, the vector index, open visits only |
 | `test_paypal.py` | The PayPal provider against a stand-in API: sandbox only, a refund goes back once |
-| `test_last_check.py` | The check before charging |
+| `test_last_check.py` | The check before charging, in steps |
 | `test_left_behind.py` | Items no longer linked to the shopper at the door are held, not charged |
 | `test_zoom.py` | The closer look round far hands |
 | `test_staff.py` | Staff sign-in, and every route checked so only the gate is public |
@@ -450,8 +470,8 @@ uv run pytest
 Play a clip to the running server as if it were a camera:
 
 ```bash
-uv run tools/live_client.py samples/IMG_6401.MOV --shop bookshop --width 1600 --dry   # rehearsal: no charge, no email
-uv run tools/live_client.py samples/IMG_6401.MOV --shop bookshop --width 1600         # real: charges the registered shopper
+uv run tools/live_client.py samples/bookshop-demo.mp4 --shop bookshop --width 1600 --dry   # rehearsal: no charge, no email
+uv run tools/live_client.py samples/bookshop-demo.mp4 --shop bookshop --width 1600         # real: charges the registered shopper
 uv run python -m checkout.cli samples/49350-720.mp4 --fps 3 --verify                  # offline, annotated video in out/
 ```
 

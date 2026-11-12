@@ -233,7 +233,7 @@ function chain(tx) {
   for (const e of unfolded(d.events)) {
     const [html, minor] = describe(e, ctx);
     const good = (e.type === "audit" && e.verdict === "kept") || (e.type === "payment" && e.status === "succeeded") || (["invoice", "email"].includes(e.type) && ["created", "sent"].includes(e.status));
-    (["exit", "audit", "payment", "invoice", "email"].includes(e.type) ? door : floor).push(step(at(e.t), html, minor && !good, good));
+    (["exit", "check", "audit", "payment", "invoice", "email"].includes(e.type) ? door : floor).push(step(at(e.t), html, minor && !good, good));
   }
   for (const r of tx.refunds) {
     const line = tx.lines.find((l) => l.id === r.purchase);

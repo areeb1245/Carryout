@@ -56,6 +56,9 @@ export function lineNote(line) {
 // What was read, without the "how it was read" lead-in the reason starts with.
 const evidence = (why) => String(why ?? "").replace(/^(Read in hand twice|Read in hand at exit|Identified on the shelf, confirmed in hand): /, "");
 
+// The question one step of the final check asked, in words.
+const checkQuestion = (e, item) => ({ leaving: "In the hands as they leave?", held: `${item} in the hand?`, shelf: "Item put on the shelf?", which: "Unreadable book in the hand looks like?", placed: "Book going onto the shelf looks like?" })[e.ask] ?? "";
+
 // One event as [html, is it a minor one]. `ctx` knows the scene: who(person id) is a name, line(entry id) is the
 // bag line an event is about, money(amount, currency) writes a sum.
 export function describe(e, ctx) {
@@ -82,6 +85,8 @@ export function describe(e, ctx) {
       if (e.verdict === "kept") return [`Final check: ${item} confirmed (${esc(e.why)})`, true];
       if (e.verdict === "put_back") return [`Final check: ${item} held for review (${esc(e.why)})`, false];
       return [`Final check: ${item} not confirmed, held for review (${esc(e.why)})`, false];
+    case "check":
+      return [`Final check, step ${Number(e.step)}: ${checkQuestion(e, e.name ? esc(e.name) : item)} ${esc(e.answer)}${e.why ? ` (${esc(e.why)})` : ""}`, true];
     case "invoice":
       return e.status === "created" ? [`PayPal invoice ${esc(e.number ?? "")} created`, true] : [`PayPal invoice not created: ${esc(e.message)}`, false];
     case "pick":

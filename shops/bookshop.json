@@ -2,7 +2,24 @@
   "name": "Folio House",
   "currency": "USD",
   "frame_width": 1600,
+  "leave_after_s": 3.0,
   "products": [
+    {
+      "id": "pmwcpek6x",
+      "name": "Nivea Soft moisturising cream tube",
+      "prompt": "moisturiser tube",
+      "price": 20.0,
+      "author": "Nivea",
+      "cues": "white squeeze tube, dark blue oval logo, blue wave, green leaf, white cap",
+      "category": "Beauty and personal care",
+      "section": "Moisturisers",
+      "examples": [
+        "ex-ba9493bfedfb4c8b.jpg",
+        "ex-32c4b9bfde844887.jpg",
+        "ex-ff256034d3354b38.jpg",
+        "ex-3187aa33be3b4198.jpg"
+      ]
+    },
     {
       "id": "elon-musk",
       "name": "Elon Musk",

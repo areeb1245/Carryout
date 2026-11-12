@@ -1,8 +1,8 @@
 """
 Plays a clip to the running server the way the page does, in real time, and prints what comes back.
 
-    uv run tools/live_client.py samples/IMG_6401.MOV --dry          rehearsal: no charge, no invoice, no email
-    uv run tools/live_client.py samples/IMG_6401.MOV --gate         go through the gate first, then shop for real
+    uv run tools/live_client.py samples/bookshop-demo.mp4 --dry          rehearsal: no charge, no invoice, no email
+    uv run tools/live_client.py samples/bookshop-demo.mp4 --gate         go through the gate first, then shop for real
 
 It sends a frame whenever fewer than --in-flight are in flight, never more than --fps a second, with the clip's own clock.
 
