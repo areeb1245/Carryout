@@ -1,4 +1,4 @@
-# Walk-out checkout on SAM 3.1 and PayPal
+# Carryout: walk-out checkout on SAM 3.1 and PayPal
 
 A cashierless shop that runs on ordinary cameras. Shoppers register once at a gate with their face and a PayPal
 payment method, take what they want off the shelf, and walk out. They are charged through PayPal for exactly what
@@ -514,3 +514,8 @@ products and more shops plug into the same pipeline.
 | `tools/draw_diagrams.py` | Draws the diagrams in `docs/diagrams/` |
 | `models/` | The two OpenCV face models |
 | `render.yaml` | The Render Blueprint |
+
+## Licence
+
+The code is under the GNU Affero General Public License v3.0 (`LICENSE`). The face models in `models/` come from the
+OpenCV model zoo and keep their own licences: YuNet (MIT) and SFace (Apache 2.0).
